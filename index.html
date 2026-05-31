@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PARANORMAL HUNT — Rescue Live Aircraft</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <!-- Globo 3D Cesium -->
+    <div id="cesiumContainer"></div>
+
+    <!-- HUD Top Bar -->
+    <header class="hud-top">
+      <div class="hud-brand">
+        <span class="dot pulse"></span>
+        <span id="hud-title">BUENOS AIRES TMA</span>
+      </div>
+      <div class="hud-stats">
+        <span>SCORE <strong id="stat-score">0</strong></span>
+        <span>LIVES <strong id="stat-lives">❤❤❤</strong></span>
+        <span>RES <strong id="stat-rescued">0</strong></span>
+        <span>LOST <strong id="stat-lost">0</strong></span>
+        <span>AVI <strong id="stat-aviones">0</strong></span>
+        <span>ATK <strong id="stat-attacked">0</strong></span>
+        <span>API <strong id="stat-api">--</strong></span>
+        <span>UTC <strong id="stat-utc">--:--:--</strong></span>
+      </div>
+    </header>
+
+    <!-- Sidebar izquierda: lista de aviones + presets + threats -->
+    <aside class="hud-side" id="hud-side">
+      <div class="hud-tabs">
+        <button class="tab active" data-tab="traffic">TRÁFICO</button>
+        <button class="tab" data-tab="threats">AMENAZAS</button>
+        <button class="tab" data-tab="presets">ZONAS</button>
+        <button class="tab" data-tab="comms">EVENTOS</button>
+      </div>
+
+      <div class="tab-content active" data-tab="traffic">
+        <div class="aircraft-list" id="aircraft-list">
+          <div class="empty">Cargando…</div>
+        </div>
+      </div>
+
+      <div class="tab-content" data-tab="threats">
+        <div class="threats-toolbar">
+          <button class="threats-btn fire" id="threats-all-on">🔥 ACTIVAR TODAS</button>
+          <button class="threats-btn off" id="threats-all-off">🛑 APAGAR</button>
+          <button class="threats-btn cat" data-cat="ufo">🛸 OVNIS</button>
+          <button class="threats-btn cat" data-cat="paranormal">🌀 PARA</button>
+          <button class="threats-btn cat" data-cat="creature">🦖 KAIJU</button>
+        </div>
+        <div class="threats-list" id="threats-list">
+          <!-- Generado dinámicamente -->
+        </div>
+      </div>
+
+      <div class="tab-content" data-tab="presets">
+        <div class="presets-list" id="presets-list">
+          <!-- Generado dinámicamente -->
+        </div>
+      </div>
+
+      <div class="tab-content" data-tab="comms">
+        <div class="comms-log" id="comms-log">
+          <div class="empty">Sin eventos aún…</div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Detail panel derecho con info del avión + RESCATE -->
+    <section class="hud-detail hidden" id="hud-detail">
+      <button class="close-btn" id="detail-close">×</button>
+      <h3 id="detail-callsign">--</h3>
+
+      <!-- Banner de alarma cuando está bajo ataque -->
+      <div class="attack-banner hidden" id="attack-banner">
+        <div class="attack-icon" id="attack-icon">⚠️</div>
+        <div class="attack-text">
+          <div class="attack-title" id="attack-title">BAJO ATAQUE</div>
+          <div class="attack-source" id="attack-source">--</div>
+        </div>
+        <div class="attack-timer">
+          <div class="timer-bar"><div class="timer-fill" id="timer-fill"></div></div>
+          <div class="timer-text" id="timer-text">90s</div>
+        </div>
+      </div>
+
+      <div class="detail-grid">
+        <div><label>ICAO</label><span id="detail-icao">--</span></div>
+        <div><label>FL</label><span id="detail-fl">--</span></div>
+        <div><label>VEL</label><span id="detail-vel">--</span></div>
+        <div><label>HDG</label><span id="detail-hdg">--</span></div>
+        <div><label>VARIO</label><span id="detail-vario">--</span></div>
+        <div><label>ORIG</label><span id="detail-orig">--</span></div>
+      </div>
+
+      <!-- Acciones de rescate -->
+      <div class="rescue-panel">
+        <button class="btn-rescue" id="btn-fly-to">🎯 IR AL AVIÓN</button>
+        <button class="btn-rescue purple" id="btn-chase">👁 SEGUIR (CHASE)</button>
+        <button class="btn-rescue green" id="btn-rescue" disabled>
+          🛟 RESCATAR
+        </button>
+        <p class="rescue-hint" id="rescue-hint">
+          Acercate al avión (&lt; 100 km) y tocá RESCATAR. Si dejás la cámara
+          a &lt; 12 km se rescata solo (excepto en modo chase 👁).
+        </p>
+      </div>
+    </section>
+
+    <!-- Bottom action bar -->
+    <footer class="hud-bottom">
+      <button class="btn" id="btn-globe">🌍 Globo</button>
+      <button class="btn" id="btn-center">🎯 Centrar</button>
+      <button class="btn" id="btn-reset">↺ Reset</button>
+      <button class="btn" id="btn-cinema">🎬 Cinema</button>
+      <button class="btn warn" id="btn-all-threats">🔥 All On</button>
+      <button class="btn danger" id="btn-clear-threats">☠ Stop Threats</button>
+      <button class="btn" id="btn-mute" title="Silenciar sonidos">🔊</button>
+      <button class="btn mode-toggle" id="btn-mode" data-mode="SIM">
+        🎮 SIM
+      </button>
+      <span class="hud-divider"></span>
+      <div class="imagery-switcher" id="imagery-switcher">
+        <!-- Generado dinámicamente -->
+      </div>
+      <span class="separator"></span>
+      <span class="hud-region" id="hud-region">Argentina</span>
+    </footer>
+
+    <!-- Panel detalle de amenaza (al click sobre un threat en el globo) -->
+    <section class="threat-detail hidden" id="threat-detail">
+      <button class="close-btn" id="threat-detail-close">×</button>
+      <div class="threat-detail-head">
+        <div class="threat-detail-icon" id="td-icon">🛸</div>
+        <div>
+          <h3 id="td-name">--</h3>
+          <p class="threat-detail-region" id="td-region">--</p>
+        </div>
+      </div>
+
+      <p class="threat-detail-desc" id="td-desc">--</p>
+
+      <div class="threat-detail-grid">
+        <div><label>CATEGORÍA</label><span id="td-category">--</span></div>
+        <div><label>PODER</label><span id="td-power">--</span></div>
+        <div><label>RADIO</label><span id="td-radius">--</span></div>
+        <div><label>ESTADO</label><span id="td-status">--</span></div>
+        <div><label>LAT</label><span id="td-lat">--</span></div>
+        <div><label>LON</label><span id="td-lon">--</span></div>
+      </div>
+
+      <div class="threat-detail-actions">
+        <button class="btn-rescue" id="td-fly">🎯 VOLAR HACIA</button>
+      </div>
+    </section>
+
+    <!-- Toast de eventos -->
+    <div class="toast-stack" id="toast-stack"></div>
+
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>

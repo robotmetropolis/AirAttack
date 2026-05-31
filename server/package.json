@@ -1,0 +1,15 @@
+{
+  "name": "radar-atc-3d-proxy",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Proxy server para OpenSky con OAuth2 + CORS abierto a localhost",
+  "scripts": {
+    "start": "node proxy.js",
+    "dev": "node --watch proxy.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "cors": "^2.8.5"
+  }
+}
