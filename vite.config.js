@@ -43,5 +43,8 @@ export default defineConfig({
   },
   build: {
     sourcemap: true,
+    // Necesario para `await Cesium.createWorldTerrainAsync(...)` a nivel top.
+    // Browsers modernos (Chrome 89+, FF 89+, Safari 15+) lo soportan sin issues.
+    target: "esnext",
   },
 });
