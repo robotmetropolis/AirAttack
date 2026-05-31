@@ -19,9 +19,30 @@ const useProxy = process.env.VITE_OPENSKY_USE_PROXY !== "false";
 // En dev queda en "/" así que no afecta `npm run dev`.
 const base = process.env.VITE_BASE_PATH || "/";
 
+// vite-plugin-cesium inyecta tags con paths absolutos `/cesium/...` que ignoran
+// el `base` config. Este plugin auxiliar corre después y reescribe esos paths
+// para que apunten a `${base}cesium/...`. Solo aplica si la base no es "/".
+function fixCesiumBase(baseUrl) {
+  return {
+    name: "fix-cesium-base",
+    enforce: "post",
+    apply: "build",
+    transformIndexHtml(html) {
+      if (!baseUrl || baseUrl === "/") return html;
+      return html
+        .replace(/href="\/cesium\//g, `href="${baseUrl}cesium/`)
+        .replace(/src="\/cesium\//g, `src="${baseUrl}cesium/`)
+        .replace(
+          /window\.CESIUM_BASE_URL\s*=\s*["']\/cesium\/?["']/g,
+          `window.CESIUM_BASE_URL="${baseUrl}cesium/"`
+        );
+    },
+  };
+}
+
 export default defineConfig({
   base,
-  plugins: [cesium()],
+  plugins: [cesium(), fixCesiumBase(base)],
   server: {
     port: 5173,
     open: true,
