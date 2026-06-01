@@ -196,7 +196,7 @@ function flyTo(lat, lng, altitude, ms = 1500) {
 
 function flyToGlobe() {
   state.presetKey = "GLOBE";
-  hud.hudTitle.textContent = "VISTA GLOBAL";
+  hud.hudTitle.textContent = "PARANORMAL HUNT";
   flyTo(15, 0, 2.5, 1800);
   document
     .querySelectorAll(".preset-row")
