@@ -29,13 +29,16 @@ const CATEGORIA_TIPO = {
 // directamente un `filter: brightness(0) saturate(100%) invert(...)`.
 // Más simple: aplico color al div con `--accent` como CSS var y el SVG
 // queda en blanco. El glow / outline lo da el CSS.
+// Nota: el rojo se reserva para aviones BAJO ATAQUE (ver .plane-marker.attacked
+// en style.css). Ningún tipo de avión usa rojo en su color base, así que el
+// rojo pulsante es siempre señal de peligro.
 const COLOR_POR_TIPO = {
   unknown: "#00ff7f",
   light: "#9bf06a",
   small: "#5ddc55",
   large: "#3aa0ff",
   high_vortex: "#ff8c1a",
-  heavy: "#ff4040",
+  heavy: "#00d8d8", // cyan: heavy (B747 / A380 etc), antes era rojo y confundía con ataques
   high_perf: "#ffaa00",
   rotor: "#bb55ff",
   glider: "#cccccc",
