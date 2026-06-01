@@ -163,7 +163,6 @@ const hud = {
   attackIcon: document.getElementById("attack-icon"),
   timerFill: document.getElementById("timer-fill"),
   timerText: document.getElementById("timer-text"),
-  btnFlyTo: document.getElementById("btn-fly-to"),
   btnRescue: document.getElementById("btn-rescue"),
   rescueHint: document.getElementById("rescue-hint"),
   threatDetail: document.getElementById("threat-detail"),
@@ -233,12 +232,46 @@ setInterval(() => {
 }, 1000);
 
 // ── Selección de avión ───────────────────────────────────────────────────────
+// Estado de "rastreo": cuando se selecciona un avión bajo ataque, paramos la
+// auto-rotación y centramos la cámara. Guardamos el estado previo del rotate
+// para restaurarlo al rescatar / cerrar el panel.
+const followState = {
+  active: false,
+  prevAutoRotate: false,
+  icao: null,
+};
+
+function startFollow(ac) {
+  if (followState.active) return;
+  followState.active = true;
+  followState.icao = ac.icao;
+  followState.prevAutoRotate = controls.autoRotate;
+  controls.autoRotate = false;
+  // Reflejar el cambio visual en el botón
+  btnRotate?.classList.toggle("active-rotate", false);
+  flyToAircraft(ac.icao);
+}
+
+function stopFollow({ flyBack = true } = {}) {
+  if (!followState.active) return;
+  const wasRotating = followState.prevAutoRotate;
+  followState.active = false;
+  followState.icao = null;
+  if (flyBack) flyToGlobe();
+  if (wasRotating) {
+    controls.autoRotate = true;
+    btnRotate?.classList.toggle("active-rotate", true);
+  }
+}
+
 function selectAircraft(icao) {
   state.selectedIcao = icao;
   aircraftMgr.setSelected(icao);
   refreshAircraftLayer();
   if (!icao) {
     hud.detail.classList.add("hidden");
+    // Si veníamos siguiendo un avión, volvemos a la vista global.
+    if (followState.active) stopFollow({ flyBack: true });
     return;
   }
   const ac = aircraftMgr.getById(icao);
@@ -259,6 +292,12 @@ function selectAircraft(icao) {
   hud.detailOrig.textContent = ac.origin_country || "--";
 
   refreshAttackBanner();
+
+  // Si está bajo ataque, centramos y paramos la rotación automáticamente.
+  // Reemplaza al viejo botón "CENTRAR" que se eliminó.
+  if (threatMgr.isUnderAttack(icao)) {
+    startFollow(ac);
+  }
 }
 
 aircraftMgr.onClick = (icao) => selectAircraft(icao);
@@ -602,6 +641,16 @@ threatMgr.callbacks.onEvent = (ev) => {
     playRescueSound();
     showToast(ev.msg, "ok");
     if (ev.ac) spawnRescueShield(ev.ac);
+    // Si el rescatado es el avión que estábamos siguiendo, dejamos que la
+    // animación del escudo termine y volvemos a la vista de globo +
+    // reanudamos la rotación si estaba prendida.
+    if (followState.active && ev.ac && ev.ac.icao === followState.icao) {
+      const dur = SHIELD_DURATION_MS + 200;
+      setTimeout(() => {
+        // Cierra el panel y dispara stopFollow internamente
+        selectAircraft(null);
+      }, dur);
+    }
   } else if (ev.type === "LOST") {
     playLostSound();
     showToast(ev.msg, "danger");
@@ -679,10 +728,6 @@ setInterval(() => {
 }, 1000);
 
 // ── Botones de acción ────────────────────────────────────────────────────────
-hud.btnFlyTo.addEventListener("click", () => {
-  if (state.selectedIcao) flyToAircraft(state.selectedIcao);
-});
-
 hud.btnRescue.addEventListener("click", () => {
   if (!state.selectedIcao) return;
   threatMgr.manualRescue(state.selectedIcao);
