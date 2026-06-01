@@ -148,13 +148,16 @@ html, body {
   50% { transform: scale(1.35); opacity: 0.15; }
 }
 
-/* HUD compartido */
+/* HUD compartido
+ * IMPORTANTE: globe.gl renderiza los HTML markers (aviones / amenazas) en una
+ * capa con z-index alto sobre el canvas. Los paneles de UI deben quedar por
+ * ENCIMA de esos markers, así que usamos un z-index grande (>= 1000). */
 .hud-top, .hud-side, .hud-detail, .hud-bottom {
   position: absolute;
   background: rgba(0, 16, 8, 0.82);
   border: 1px solid rgba(0, 255, 127, 0.35);
   color: #d8fff0;
-  z-index: 10;
+  z-index: 1000;
   backdrop-filter: blur(8px);
 }
 
@@ -730,7 +733,7 @@ html, body {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  z-index: 100;
+  z-index: 2000;
   pointer-events: none;
 }
 
@@ -950,7 +953,7 @@ html, body {
     calc(var(--tg) + (255 - var(--tg)) * 0.7),
     calc(var(--tb) + (255 - var(--tb)) * 0.7)
   );
-  z-index: 11;
+  z-index: 1010;
   backdrop-filter: blur(10px);
   padding: 20px 22px;
   font-size: 14px;
@@ -1108,12 +1111,14 @@ html, body {
  *   - Markers más grandes para que sean tappeables con el dedo.
  * ───────────────────────────────────────────────────────────────────── */
 
-/* Backdrop oscuro detrás del sidebar abierto en mobile */
+/* Backdrop oscuro detrás del sidebar abierto en mobile.
+ * Se ubica entre el globo (z=0) y los paneles UI (z>=1000) pero encima de
+ * los HTML markers de globe.gl, así no se ven aviones a través. */
 .side-backdrop {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.55);
-  z-index: 9;
+  z-index: 990;
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.25s ease;
@@ -1178,7 +1183,8 @@ html, body {
     font-size: 14px;
   }
 
-  /* Sidebar: off-canvas slide-in */
+  /* Sidebar: off-canvas slide-in. Z-index encima de los paneles de detalle
+   * para que cuando se abra el menú tape cualquier popup que esté visible. */
   .hud-side {
     top: 64px;
     bottom: 14px;
@@ -1187,7 +1193,7 @@ html, body {
     max-width: 320px;
     transform: translateX(calc(-100% - 24px));
     transition: transform 0.28s ease;
-    z-index: 12;
+    z-index: 1100;
   }
   .hud-side.open {
     transform: translateX(0);
