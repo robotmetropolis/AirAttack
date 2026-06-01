@@ -850,8 +850,20 @@ sidebarEl.addEventListener("click", (ev) => {
 // que los gestos rotate/pinch sobre el globo funcionen aunque el dedo aterrice
 // sobre un avión o amenaza. Detectamos el "tap" (touch corto y sin movimiento)
 // y hacemos hit-test contra los bounding rects de los markers, despachando un
-// click sintético al marker tappeado. Funciona en cualquier device touch.
-const isTouchDevice = window.matchMedia("(pointer: coarse)").matches;
+// click sintético al marker tappeado.
+//
+// Detección robusta de touch: matchMedia (pointer: coarse) falla en algunos
+// browsers híbridos. Combinamos varios checks. Si hay touch, marcamos el body
+// con .is-touch y el CSS desactiva pointer-events de los markers.
+const isTouchDevice =
+  "ontouchstart" in window ||
+  (navigator.maxTouchPoints && navigator.maxTouchPoints > 0) ||
+  window.matchMedia("(pointer: coarse)").matches;
+
+if (isTouchDevice) {
+  document.body.classList.add("is-touch");
+}
+
 if (isTouchDevice) {
   let tapStartX = 0;
   let tapStartY = 0;
