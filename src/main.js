@@ -789,6 +789,97 @@ sidebarEl.addEventListener("click", (ev) => {
   }
 });
 
+// ── Mobile: hit-test manual de markers ───────────────────────────────────────
+// En dispositivos touch los markers tienen `pointer-events: none` (CSS) para
+// que los gestos rotate/pinch sobre el globo funcionen aunque el dedo aterrice
+// sobre un avión o amenaza. Detectamos el "tap" (touch corto y sin movimiento)
+// y hacemos hit-test contra los bounding rects de los markers, despachando un
+// click sintético al marker tappeado. Funciona en cualquier device touch.
+const isTouchDevice = window.matchMedia("(pointer: coarse)").matches;
+if (isTouchDevice) {
+  let tapStartX = 0;
+  let tapStartY = 0;
+  let tapStartT = 0;
+  let tapTouchId = null;
+  let tapMoved = false;
+  const TAP_MAX_DURATION_MS = 350;
+  const TAP_MAX_MOVE_PX = 12;
+
+  container.addEventListener(
+    "touchstart",
+    (e) => {
+      if (e.touches.length !== 1) {
+        // multi-touch (pinch zoom): cancelamos cualquier tap pendiente
+        tapTouchId = null;
+        return;
+      }
+      const t = e.touches[0];
+      tapTouchId = t.identifier;
+      tapStartX = t.clientX;
+      tapStartY = t.clientY;
+      tapStartT = Date.now();
+      tapMoved = false;
+    },
+    { passive: true }
+  );
+
+  container.addEventListener(
+    "touchmove",
+    (e) => {
+      if (tapTouchId == null) return;
+      const t = Array.from(e.touches).find((x) => x.identifier === tapTouchId);
+      if (!t) return;
+      const dx = t.clientX - tapStartX;
+      const dy = t.clientY - tapStartY;
+      if (Math.hypot(dx, dy) > TAP_MAX_MOVE_PX) tapMoved = true;
+    },
+    { passive: true }
+  );
+
+  container.addEventListener(
+    "touchend",
+    (e) => {
+      if (tapTouchId == null) return;
+      const t = Array.from(e.changedTouches).find(
+        (x) => x.identifier === tapTouchId
+      );
+      tapTouchId = null;
+      if (!t || tapMoved) return;
+      if (Date.now() - tapStartT > TAP_MAX_DURATION_MS) return;
+
+      const x = t.clientX;
+      const y = t.clientY;
+      // Hit-test manual contra todos los markers visibles. Recorremos en
+      // orden inverso para preferir el último renderizado (encima visualmente).
+      const markers = document.querySelectorAll(
+        ".threat-marker, .plane-marker"
+      );
+      let hit = null;
+      for (let i = markers.length - 1; i >= 0; i--) {
+        const r = markers[i].getBoundingClientRect();
+        if (r.width === 0 || r.height === 0) continue;
+        if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
+          hit = markers[i];
+          break;
+        }
+      }
+      if (hit) {
+        // Despachamos un click "real" para que reuse los listeners ya
+        // adjuntados por aircraft.js / threatRender.js.
+        hit.dispatchEvent(
+          new MouseEvent("click", {
+            bubbles: true,
+            cancelable: true,
+            clientX: x,
+            clientY: y,
+          })
+        );
+      }
+    },
+    { passive: true }
+  );
+}
+
 // ── Boot ─────────────────────────────────────────────────────────────────────
 flyToGlobe();
 activateAllThreats(null, { silent: true });

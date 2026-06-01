@@ -54,6 +54,7 @@ html, body {
   justify-content: center;
   pointer-events: auto;
   transition: transform 0.15s ease-out;
+  touch-action: none;
 }
 
 .plane-marker .plane-img {
@@ -107,6 +108,7 @@ html, body {
   align-items: center;
   justify-content: center;
   pointer-events: auto;
+  touch-action: none;
 }
 
 .threat-marker .threat-halo {
@@ -1329,6 +1331,18 @@ html, body {
     font-size: 11px;
     padding: 10px 0;
     letter-spacing: 1px;
+  }
+}
+
+/* En dispositivos touch (mobile / tablet) los HTML markers de globe.gl
+ * dejan pasar TODOS los gestos (rotate / pinch / pan) al canvas que está
+ * abajo. Los taps se detectan en main.js mediante hit-test manual. Sin
+ * esto, si el dedo aterrizaba sobre un avión o amenaza, el gesto era
+ * absorbido por el marker y el globo no rotaba ni hacía zoom. */
+@media (pointer: coarse) {
+  .plane-marker,
+  .threat-marker {
+    pointer-events: none;
   }
 }
 
