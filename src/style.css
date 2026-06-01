@@ -1369,28 +1369,10 @@ body.is-touch .threat-marker {
   pointer-events: none !important;
 }
 
-/* globe.gl renderiza los HTML markers dentro de un div wrapper del
- * CSS2DRenderer de Three.js. Si ese wrapper captura los touch events,
- * OrbitControls (que escucha en el <canvas>) nunca recibe los gestos.
- * Lo neutralizamos en mobile dejándolo pasar todo. Los <div> hijos no
- * se ven afectados porque tienen pointer-events: none arriba. */
-body.is-touch #globeContainer > div {
-  pointer-events: none;
-}
-body.is-touch #globeContainer > canvas {
-  pointer-events: auto;
-}
-
 @media (pointer: coarse) {
   .plane-marker,
   .threat-marker {
     pointer-events: none;
-  }
-  #globeContainer > div {
-    pointer-events: none;
-  }
-  #globeContainer > canvas {
-    pointer-events: auto;
   }
 }
 

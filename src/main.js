@@ -213,11 +213,13 @@ function flyToPreset(presetKey) {
 function flyToAircraft(icao) {
   const ac = aircraftMgr.getById(icao);
   if (!ac) return;
-  // Offset hacia el sur (latitud menor) para que el avión quede en el tercio
-  // superior de la pantalla, así el panel de detalle (bottom-sheet en mobile)
-  // no lo tapa. El centro de la cámara queda apuntando un poco más abajo.
+  // Offset hacia el sur (latitud menor) para que el avión quede un poco
+  // arriba del centro, así no lo tapa el panel inferior. En mobile el
+  // panel ocupa más relativo a la pantalla, pero usar un offset chico
+  // (~3.5°) deja al avión visible y centrado horizontalmente.
   const altitude = 0.18;
-  const latOffset = 7;
+  const isMobile = window.matchMedia("(max-width: 900px)").matches;
+  const latOffset = isMobile ? 3.5 : 5;
   let centerLat = ac.lat - latOffset;
   if (centerLat < -85) centerLat = -85;
   if (centerLat > 85) centerLat = 85;
@@ -862,6 +864,34 @@ const isTouchDevice =
 
 if (isTouchDevice) {
   document.body.classList.add("is-touch");
+
+  // En mobile globe.gl mete los HTML markers dentro de un wrapper (CSS2DRenderer
+  // de Three.js). Por defecto ese wrapper captura touch events y bloquea los
+  // gestos de OrbitControls. Lo identificamos buscando el div hijo de
+  // #globeContainer que contiene los markers, y le apagamos pointer-events.
+  // No tocamos OTROS divs (que pueden ser wrappers que contienen el canvas
+  // de Three.js, los cuales SÍ necesitan recibir touch para rotate/zoom).
+  function disableMarkerWrappersPE() {
+    const candidates = container.querySelectorAll("div");
+    for (const div of candidates) {
+      // Solo divs que contienen markers (CSS2DRenderer dom).
+      if (
+        div.children.length > 0 &&
+        (div.firstElementChild?.classList?.contains("plane-marker") ||
+          div.firstElementChild?.classList?.contains("threat-marker") ||
+          div.querySelector?.(":scope > .plane-marker, :scope > .threat-marker"))
+      ) {
+        if (div.style.pointerEvents !== "none") {
+          div.style.pointerEvents = "none";
+        }
+      }
+    }
+  }
+  // Ejecutar después del primer render y luego periódicamente por si el
+  // wrapper se recrea (raro, pero por las dudas).
+  setTimeout(disableMarkerWrappersPE, 200);
+  setTimeout(disableMarkerWrappersPE, 800);
+  setInterval(disableMarkerWrappersPE, 3000);
 }
 
 if (isTouchDevice) {
