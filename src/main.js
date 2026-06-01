@@ -91,7 +91,9 @@ const CITIES_URL =
   }
 })();
 
-// Auto-rotación inicial: la cortamos ni bien el usuario interactúa.
+// Auto-rotación: prendida por default, sólo se apaga / prende desde el botón
+// 🔄 del header. OrbitControls ya pausa la rotación naturalmente mientras el
+// usuario está arrastrando, y la reanuda al soltar.
 const controls = globe.controls();
 controls.autoRotate = true;
 controls.autoRotateSpeed = 0.35;
@@ -99,15 +101,6 @@ controls.enableDamping = true;
 controls.dampingFactor = 0.08;
 controls.rotateSpeed = 0.6;
 controls.zoomSpeed = 0.9;
-
-// Mientras el usuario interactúa (drag), pausamos la auto-rotación. Cuando
-// termina la interacción NO la reanudamos por sí sola: queda en el último
-// estado que el usuario eligió desde el botón del header. Así si lo apagaste
-// adrede, no vuelve a prenderse al soltar el mouse.
-let userToggledRotate = false;
-container.addEventListener("pointerdown", () => {
-  if (!userToggledRotate) controls.autoRotate = false;
-});
 
 // Resize: globe.gl no se ajusta solo cuando cambia el viewport.
 function fitGlobe() {
@@ -751,7 +744,6 @@ const btnRotate = document.getElementById("btn-rotate");
 btnRotate.classList.add("active-rotate");
 btnRotate.addEventListener("click", () => {
   controls.autoRotate = !controls.autoRotate;
-  userToggledRotate = controls.autoRotate; // marcar que el user eligió esto adrede
   btnRotate.classList.toggle("active-rotate", controls.autoRotate);
 });
 
