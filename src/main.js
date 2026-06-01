@@ -1,19 +1,15 @@
-// Bootstrap del juego "Paranormal Hunt".
-// Stack: Vite + CesiumJS + módulos JS nativos.
+// Bootstrap del juego "Paranormal Hunt — Globe Edition".
+// Stack: Vite + globe.gl (Three.js) + módulos JS nativos.
 
-import * as Cesium from "cesium";
-import "cesium/Build/Cesium/Widgets/widgets.css";
+import Globe from "globe.gl";
 
 import { fetchAircraft } from "./opensky.js";
 import { PRESETS, REGIONES } from "./presets.js";
 import { AircraftManager } from "./aircraft.js";
-import { AirportsManager } from "./airports.js";
-import { CinemaMode } from "./cinema.js";
 import { flagFor } from "./flags.js";
-import { IMAGERY_PROVIDERS, setBaseLayer } from "./imagery.js";
 import { THREATS, THREAT_CATEGORIES } from "./threats.js";
 import { ThreatManager } from "./threatManager.js";
-import { ThreatRenderer } from "./threatRender.js";
+import { ThreatRenderer, colorForThreat } from "./threatRender.js";
 import { Simulator } from "./simulator.js";
 import {
   playAttackSound,
@@ -24,201 +20,150 @@ import {
   isMuted,
 } from "./audio.js";
 
-// ── Cesium Ion token ─────────────────────────────────────────────────────────
-const ionToken = import.meta.env.VITE_CESIUM_ION_TOKEN;
-const useIon =
-  ionToken &&
-  ionToken.length > 60 &&
-  !ionToken.includes("dummy") &&
-  !ionToken.includes("pegar_aqui");
-
-if (useIon) {
-  Cesium.Ion.defaultAccessToken = ionToken;
+// ── Constantes ───────────────────────────────────────────────────────────────
+const EARTH_RADIUS_KM = 6371;
+// Convierte una "altura sobre el suelo" en metros (como las usa Cesium en
+// presets.js) a "altitude" en unidades de radio terrestre que pide globe.gl.
+function metersToAltitude(m) {
+  return m / 1000 / EARTH_RADIUS_KM;
 }
 
-// ── Viewer ───────────────────────────────────────────────────────────────────
-const viewerOptions = {
-  animation: false,
-  timeline: false,
-  geocoder: false,
-  homeButton: false,
-  sceneModePicker: false,
-  baseLayerPicker: false,
-  navigationHelpButton: false,
-  fullscreenButton: false,
-  infoBox: false,
-  selectionIndicator: false,
-  shadows: false,
-  shouldAnimate: true,
+// Texturas equirectangulares para el globo. Las hosteamos del CDN de
+// `vasturiano/three-globe` que viene con el package globe.gl, así no
+// dependemos de tener archivos en `public/`.
+const GLOBE_THEMES = {
+  dark: {
+    label: "Dark",
+    globeImageUrl:
+      "//unpkg.com/three-globe/example/img/earth-night.jpg",
+    bumpImageUrl:
+      "//unpkg.com/three-globe/example/img/earth-topology.png",
+    backgroundImageUrl:
+      "//unpkg.com/three-globe/example/img/night-sky.png",
+    atmosphereColor: "#3399cc",
+    atmosphereAltitude: 0.18,
+  },
 };
+const currentTheme = "dark";
 
-// Default: TOPO (OpenTopoMap) — tiles livianos, vista con relieve, sin token.
-viewerOptions.baseLayer = new Cesium.ImageryLayer(
-  IMAGERY_PROVIDERS.TOPO.create(),
-);
-if (!useIon) {
-  viewerOptions.terrainProvider = new Cesium.EllipsoidTerrainProvider();
-}
+// ── Setup del globo ──────────────────────────────────────────────────────────
+const container = document.getElementById("globeContainer");
+const theme = GLOBE_THEMES[currentTheme];
 
-const viewer = new Cesium.Viewer("cesiumContainer", viewerOptions);
-let currentImageryKey = "TOPO";
+const globe = new Globe(container)
+  .globeImageUrl(theme.globeImageUrl)
+  .bumpImageUrl(theme.bumpImageUrl)
+  .backgroundImageUrl(theme.backgroundImageUrl)
+  .atmosphereColor(theme.atmosphereColor)
+  .atmosphereAltitude(theme.atmosphereAltitude)
+  .showAtmosphere(true)
+  .showGraticules(false);
 
-viewer.scene.skyAtmosphere.show = true;
-viewer.scene.fog.enabled = true;
-viewer.scene.fog.density = 5e-5;
-viewer.scene.globe.enableLighting = true;
-viewer.scene.globe.depthTestAgainstTerrain = false;
+// ── Capa de ciudades (Natural Earth populated places) ────────────────────────
+// Dataset liviano (~80 KB) con ~250 ciudades grandes del mundo, su población
+// y país. Lo usamos como label layer del globo para dar contexto geográfico.
+const CITIES_URL =
+  "https://cdn.jsdelivr.net/gh/nvkelso/natural-earth-vector@master/geojson/ne_110m_populated_places_simple.geojson";
 
-if (useIon) {
+(async () => {
   try {
-    const terrain = await Cesium.createWorldTerrainAsync({
-      requestVertexNormals: true,
-      requestWaterMask: true,
-    });
-    viewer.scene.terrainProvider = terrain;
+    const res = await fetch(CITIES_URL);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const geojson = await res.json();
+    // Cada feature tiene: properties.name, latitude, longitude, pop_max
+    const cities = geojson.features
+      .filter((f) => f.properties.pop_max > 200_000)
+      .map((f) => f.properties);
+    globe
+      .labelsData(cities)
+      .labelLat((d) => d.latitude)
+      .labelLng((d) => d.longitude)
+      .labelText((d) => d.name)
+      .labelSize((d) => Math.sqrt(d.pop_max) * 3e-4)
+      .labelDotRadius((d) => Math.sqrt(d.pop_max) * 3e-4)
+      .labelColor(() => "rgba(255, 180, 70, 0.75)")
+      .labelResolution(2)
+      .labelAltitude(0.005)
+      .labelIncludeDot(true);
+    console.log(`[cities] loaded ${cities.length}`);
   } catch (err) {
-    console.warn("[cesium] terreno Ion no disponible", err);
+    console.warn("[cities] no se pudo cargar el dataset", err);
   }
+})();
+
+// Auto-rotación inicial: la cortamos ni bien el usuario interactúa.
+const controls = globe.controls();
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.35;
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.rotateSpeed = 0.6;
+controls.zoomSpeed = 0.9;
+
+// Mientras el usuario interactúa (drag), pausamos la auto-rotación. Cuando
+// termina la interacción NO la reanudamos por sí sola: queda en el último
+// estado que el usuario eligió desde el botón del header. Así si lo apagaste
+// adrede, no vuelve a prenderse al soltar el mouse.
+let userToggledRotate = false;
+container.addEventListener("pointerdown", () => {
+  if (!userToggledRotate) controls.autoRotate = false;
+});
+
+// Resize: globe.gl no se ajusta solo cuando cambia el viewport.
+function fitGlobe() {
+  globe.width(container.clientWidth);
+  globe.height(container.clientHeight);
 }
+fitGlobe();
+window.addEventListener("resize", fitGlobe);
 
 // ── Estado de la app ─────────────────────────────────────────────────────────
 const state = {
-  preset: PRESETS.AEP,
-  presetKey: "AEP",
+  presetKey: "GLOBE",
+  preset: { lat: 0, lon: 0, height: 24_000_000, label: "Globe", region: "Mundo" },
   selectedIcao: null,
   pollIntervalMs: 10_000,
-  simIntervalMs: 1_500, // refresh más rápido en modo SIM (no consume API)
+  simIntervalMs: 1_500,
   lastAircraftList: [],
-  mode: "SIM", // "SIM" | "LIVE"
+  mode: "SIM",
+  lastAttackSoundAt: 0,
 };
 
-const aircraftManager = new AircraftManager(viewer);
-const airportsManager = new AirportsManager(viewer);
-const threatMgr = new ThreatManager(viewer);
-const cinema = new CinemaMode(viewer, aircraftManager, threatMgr);
-const threatRenderer = new ThreatRenderer(viewer);
+// ── Managers ─────────────────────────────────────────────────────────────────
+const aircraftMgr = new AircraftManager();
+const threatRenderer = new ThreatRenderer();
+const threatMgr = new ThreatManager(null);
 const simulator = new Simulator(80);
 
-// Cuando el chase/cinema se activa, deshabilitar el rescate por proximidad
-// para que la cámara pueda estar cerca del avión sin rescatarlo solo.
-cinema.callbacks.onActiveChange = (active) => {
-  threatMgr.setProximityRescueEnabled(!active);
-};
+// El threatManager espera un viewer Cesium con `camera.positionCartographic`
+// para calcular proximidad. Como ya no hay cámara cercana al avión (todo
+// es a nivel global) deshabilitamos el rescate por proximidad por completo.
+threatMgr.setProximityRescueEnabled(false);
 
-// ── Cámara ───────────────────────────────────────────────────────────────────
-function flyToPreset(presetKey, options = {}) {
-  const preset = PRESETS[presetKey];
-  if (!preset) return;
-  state.preset = preset;
-  state.presetKey = presetKey;
-
-  if (cinema.active) {
-    cinema.stop();
-    document.getElementById("btn-cinema").classList.remove("active");
-  }
-
-  document.getElementById("hud-title").textContent = preset.label.toUpperCase();
-  document.getElementById("hud-region").textContent = preset.region;
-
-  viewer.camera.flyTo({
-    destination: Cesium.Cartesian3.fromDegrees(
-      preset.lon,
-      preset.lat - (preset.height < 200_000 ? 0.45 : 5),
-      preset.height,
-    ),
-    orientation: {
-      heading: 0,
-      pitch: Cesium.Math.toRadians(preset.height < 200_000 ? -35 : -75),
-      roll: 0,
-    },
-    duration: options.duration ?? 2.0,
-    complete: () => viewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY),
-  });
-
-  airportsManager.showInBbox(preset.bbox);
-
-  document.querySelectorAll(".preset-row").forEach((el) => {
-    el.classList.toggle("active", el.dataset.preset === presetKey);
-  });
-
-  pollOnce();
-}
-
-/**
- * Vista "Rubik's cube": cámara fija a media distancia mirando al centro
- * de la Tierra, sin pistas de aeropuerto, lista para arrastrar y rotar.
- */
-function flyToGlobe(options = {}) {
-  if (cinema.active) {
-    cinema.stop();
-    document.getElementById("btn-cinema").classList.remove("active");
-  }
-  state.presetKey = "GLOBE";
-  airportsManager.hideAll?.();
-
-  document.getElementById("hud-title").textContent = "VISTA GLOBAL";
-  document.getElementById("hud-region").textContent = "🌍 Mundo";
-
-  viewer.camera.flyTo({
-    destination: Cesium.Cartesian3.fromDegrees(0, 15, 24_000_000),
-    orientation: {
-      heading: 0,
-      pitch: Cesium.Math.toRadians(-90),
-      roll: 0,
-    },
-    duration: options.duration ?? 2.0,
-    complete: () => {
-      // Al llegar al globo, dejamos al usuario rotar libremente.
-      // Cesium hace `lookAt` por default; lo desactivamos para liberar la cámara.
-      viewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
-    },
-  });
-
-  document
-    .querySelectorAll(".preset-row")
-    .forEach((el) => el.classList.remove("active"));
-
-  pollOnce();
-}
-
-// Configuración de controles para que se sienta como manipular un cubo de Rubik:
-// arrastrar = rotar el globo, rueda = zoom, click derecho = inclinar.
-const sscc = viewer.scene.screenSpaceCameraController;
-sscc.enableTilt = true;
-sscc.enableRotate = true;
-sscc.enableZoom = true;
-sscc.enableLook = false;
-// Limitar zoom para que no nos clave en el suelo ni nos mande al espacio profundo.
-sscc.minimumZoomDistance = 100_000;
-sscc.maximumZoomDistance = 60_000_000;
-
-// Arranque en modo globo.
-flyToGlobe({ duration: 0 });
-
-// ── HUD: refs ────────────────────────────────────────────────────────────────
+// ── Refs DOM del HUD ─────────────────────────────────────────────────────────
 const hud = {
-  aviones: document.getElementById("stat-aviones"),
-  attacked: document.getElementById("stat-attacked"),
-  api: document.getElementById("stat-api"),
-  utc: document.getElementById("stat-utc"),
   score: document.getElementById("stat-score"),
   lives: document.getElementById("stat-lives"),
   rescued: document.getElementById("stat-rescued"),
   lost: document.getElementById("stat-lost"),
-  list: document.getElementById("aircraft-list"),
+  aviones: document.getElementById("stat-aviones"),
+  attacked: document.getElementById("stat-attacked"),
+  api: document.getElementById("stat-api"),
+  utc: document.getElementById("stat-utc"),
+  hudTitle: document.getElementById("hud-title"),
+  aircraftList: document.getElementById("aircraft-list"),
   presetsList: document.getElementById("presets-list"),
   threatsList: document.getElementById("threats-list"),
   commsLog: document.getElementById("comms-log"),
-  toastStack: document.getElementById("toast-stack"),
   detail: document.getElementById("hud-detail"),
+  detailClose: document.getElementById("detail-close"),
   detailCallsign: document.getElementById("detail-callsign"),
   detailIcao: document.getElementById("detail-icao"),
-  detailFL: document.getElementById("detail-fl"),
+  detailFl: document.getElementById("detail-fl"),
   detailVel: document.getElementById("detail-vel"),
   detailHdg: document.getElementById("detail-hdg"),
   detailVario: document.getElementById("detail-vario"),
   detailOrig: document.getElementById("detail-orig"),
-  detailClose: document.getElementById("detail-close"),
   attackBanner: document.getElementById("attack-banner"),
   attackTitle: document.getElementById("attack-title"),
   attackSource: document.getElementById("attack-source"),
@@ -226,11 +171,10 @@ const hud = {
   timerFill: document.getElementById("timer-fill"),
   timerText: document.getElementById("timer-text"),
   btnFlyTo: document.getElementById("btn-fly-to"),
-  btnChase: document.getElementById("btn-chase"),
   btnRescue: document.getElementById("btn-rescue"),
   rescueHint: document.getElementById("rescue-hint"),
-  // Panel detalle amenaza
   threatDetail: document.getElementById("threat-detail"),
+  threatDetailClose: document.getElementById("threat-detail-close"),
   tdIcon: document.getElementById("td-icon"),
   tdName: document.getElementById("td-name"),
   tdRegion: document.getElementById("td-region"),
@@ -242,536 +186,446 @@ const hud = {
   tdLat: document.getElementById("td-lat"),
   tdLon: document.getElementById("td-lon"),
   tdFly: document.getElementById("td-fly"),
-  threatDetailClose: document.getElementById("threat-detail-close"),
+  toastStack: document.getElementById("toast-stack"),
 };
 
-// ── Tabs ─────────────────────────────────────────────────────────────────────
-document.querySelectorAll(".hud-tabs .tab").forEach((tab) => {
-  tab.addEventListener("click", () => {
-    const which = tab.dataset.tab;
-    document
-      .querySelectorAll(".hud-tabs .tab")
-      .forEach((t) => t.classList.toggle("active", t === tab));
-    document
-      .querySelectorAll(".tab-content")
-      .forEach((c) => c.classList.toggle("active", c.dataset.tab === which));
-  });
-});
+// ── Cámara: pointOfView helpers ──────────────────────────────────────────────
+function flyTo(lat, lng, altitude, ms = 1500) {
+  globe.pointOfView({ lat, lng, altitude }, ms);
+}
 
-// ── Renderizar lista de presets ──────────────────────────────────────────────
-function renderPresets() {
-  let html = "";
-  for (const [region, keys] of Object.entries(REGIONES)) {
-    html += `<div class="presets-region">${region.toUpperCase()}</div>`;
-    for (const key of keys) {
-      const p = PRESETS[key];
-      html += `<div class="preset-row" data-preset="${key}">
-        <span class="icao">${p.icao}</span>
-        <span class="label">${p.label}</span>
-      </div>`;
-    }
-  }
-  hud.presetsList.innerHTML = html;
-  hud.presetsList.querySelectorAll(".preset-row").forEach((el) => {
-    el.addEventListener("click", () => flyToPreset(el.dataset.preset));
+function flyToGlobe() {
+  state.presetKey = "GLOBE";
+  hud.hudTitle.textContent = "VISTA GLOBAL";
+  flyTo(15, 0, 2.5, 1800);
+  document
+    .querySelectorAll(".preset-row")
+    .forEach((el) => el.classList.remove("active"));
+}
+
+function flyToPreset(presetKey) {
+  const p = PRESETS[presetKey];
+  if (!p) return;
+  state.presetKey = presetKey;
+  state.preset = p;
+  hud.hudTitle.textContent = p.label.toUpperCase();
+  // Convertir height en metros → altitude (radios). Aplicamos una escala
+  // suave para que vistas de aeropuerto no queden tan pegadas.
+  const altitude = Math.max(0.08, metersToAltitude(p.height) * 1.6);
+  flyTo(p.lat, p.lon, altitude, 1500);
+  document.querySelectorAll(".preset-row").forEach((el) => {
+    el.classList.toggle("active", el.dataset.preset === presetKey);
   });
 }
-renderPresets();
 
-// ── Renderizar lista de amenazas ─────────────────────────────────────────────
-function renderThreats() {
-  const grouped = { ufo: [], paranormal: [], creature: [] };
-  for (const [id, t] of Object.entries(THREATS)) {
-    grouped[t.category].push({ id, ...t });
-  }
-
-  let html = "";
-  for (const [cat, list] of Object.entries(grouped)) {
-    const meta = THREAT_CATEGORIES[cat];
-    html += `<div class="threat-cat-header" style="color:${meta.color}">
-      <span>${meta.icon} ${meta.label}</span>
-      <span>${list.length}</span>
-    </div>`;
-    for (const t of list) {
-      const stars = "★".repeat(t.power) + "☆".repeat(5 - t.power);
-      html += `<div class="threat-row" data-threat="${t.id}" data-color="${t.color}">
-        <div class="threat-icon">${t.icon}</div>
-        <div class="threat-info">
-          <div class="threat-name">${t.name}</div>
-          <div class="threat-region">${t.region}</div>
-          <div class="threat-power">${stars} · ${t.radius_km} km</div>
-        </div>
-      </div>`;
-    }
-  }
-  hud.threatsList.innerHTML = html;
-  hud.threatsList.querySelectorAll(".threat-row").forEach((el) => {
-    el.addEventListener("click", () => {
-      const id = el.dataset.threat;
-      threatMgr.toggleThreat(id);
-      el.classList.toggle("active", threatMgr.isActive(id));
-      threatRenderer.syncWithActive([...threatMgr.activeThreats.keys()]);
-    });
-  });
+function flyToAircraft(icao) {
+  const ac = aircraftMgr.getById(icao);
+  if (!ac) return;
+  flyTo(ac.lat, ac.lon, 0.18, 1400);
 }
-renderThreats();
 
-// ── Switcher de imagery ──────────────────────────────────────────────────────
-function renderImagerySwitcher() {
-  const container = document.getElementById("imagery-switcher");
-  container.innerHTML = Object.entries(IMAGERY_PROVIDERS)
-    .map(
-      ([key, p]) =>
-        `<button class="imagery-btn ${
-          key === currentImageryKey ? "active" : ""
-        }" data-img="${key}" title="${p.name}">${p.label}</button>`,
-    )
-    .join("");
-  container.querySelectorAll(".imagery-btn").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const key = btn.dataset.img;
-      setBaseLayer(viewer, key);
-      currentImageryKey = key;
-      container
-        .querySelectorAll(".imagery-btn")
-        .forEach((b) => b.classList.toggle("active", b === btn));
-    });
-  });
+function flyToThreat(threatId) {
+  const t = THREATS[threatId];
+  if (!t) return;
+  // Altura proporcional al radius; amenazas globales como Bermuda se ven mejor
+  // un poco más arriba para apreciar el radio entero.
+  const altitude = Math.max(0.18, t.radius_km / 5_000);
+  flyTo(t.lat, t.lon, altitude, 1500);
 }
-renderImagerySwitcher();
 
-// ── Reloj UTC ────────────────────────────────────────────────────────────────
-function tickClock() {
-  hud.utc.textContent = new Date().toISOString().substring(11, 19);
-}
-tickClock();
-setInterval(tickClock, 1000);
+// ── Tiempo UTC ───────────────────────────────────────────────────────────────
+setInterval(() => {
+  const now = new Date();
+  hud.utc.textContent = now.toISOString().substring(11, 19);
+}, 1000);
 
-// ── Lista de aviones ─────────────────────────────────────────────────────────
-function renderAircraftList(aircraft) {
-  if (aircraft.length === 0) {
-    hud.list.innerHTML = '<div class="empty">Sin tráfico en el área…</div>';
+// ── Selección de avión ───────────────────────────────────────────────────────
+function selectAircraft(icao) {
+  state.selectedIcao = icao;
+  aircraftMgr.setSelected(icao);
+  refreshAircraftLayer();
+  if (!icao) {
+    hud.detail.classList.add("hidden");
     return;
   }
-  aircraft.sort((a, b) => a.callsign.localeCompare(b.callsign));
-  hud.list.innerHTML = aircraft
-    .map((ac) => {
-      const fl = ac.geo_alt
-        ? "FL" + Math.round(ac.geo_alt / 30.48).toString().padStart(3, "0")
-        : "GND";
-      const sel = state.selectedIcao === ac.icao ? "selected" : "";
-      const att = threatMgr.isUnderAttack(ac.icao) ? "attacked" : "";
-      const flag = flagFor(ac.country);
-      return `<div class="aircraft-row ${sel} ${att}" data-icao="${ac.icao}">
-        <span class="callsign"><span class="row-flag">${flag}</span> ${ac.callsign}${
-          att ? " ⚠️" : ""
-        }</span>
-        <span class="alt">${fl}</span>
-      </div>`;
-    })
-    .join("");
-  hud.list.querySelectorAll(".aircraft-row").forEach((el) => {
-    el.addEventListener("click", () => {
-      const ac = aircraft.find((a) => a.icao === el.dataset.icao);
-      if (ac) selectAircraft(ac);
-    });
-  });
-}
+  const ac = aircraftMgr.getById(icao);
+  if (!ac) return;
 
-// ── Selección de avión ──────────────────────────────────────────────────────
-function selectAircraft(ac) {
-  state.selectedIcao = ac.icao;
-  aircraftManager.highlight(ac.icao);
-
-  const flag = flagFor(ac.country);
-  hud.detailCallsign.innerHTML = `<span class="detail-flag">${flag}</span> ${ac.callsign}`;
-  hud.detailIcao.textContent = ac.icao?.toUpperCase() || "--";
-  hud.detailFL.textContent = ac.geo_alt
-    ? "FL" + Math.round(ac.geo_alt / 30.48).toString().padStart(3, "0")
-    : "GND";
-  hud.detailVel.textContent = ac.velocity
-    ? Math.round(ac.velocity * 1.94384) + " kt"
-    : "--";
-  hud.detailHdg.textContent =
-    ac.heading != null ? Math.round(ac.heading) + "°" : "--";
-  hud.detailVario.textContent =
-    ac.vertical_rate != null
-      ? (ac.vertical_rate >= 0 ? "+" : "") +
-        Math.round(ac.vertical_rate * 196.85) +
-        " fpm"
-      : "--";
-  hud.detailOrig.innerHTML = `${flag} ${ac.country || "--"}`;
   hud.detail.classList.remove("hidden");
-
-  document
-    .querySelectorAll(".aircraft-row")
-    .forEach((el) => el.classList.remove("selected"));
-  document
-    .querySelector(`.aircraft-row[data-icao="${ac.icao}"]`)
-    ?.classList.add("selected");
-
-  // Si hay un chase activo y se cambió de avión, parar el chase anterior.
-  // Si está en modo cinema (auto-cycle), también se para porque interfiere.
-  if (cinema.active && !cinema.isChasing(ac.icao)) {
-    cinema.stop();
-    document.getElementById("btn-cinema").classList.remove("active");
-    hud.btnChase.classList.remove("active");
-  }
+  hud.detailCallsign.textContent = `${flagFor(ac.origin_country) || ""} ${ac.callsign || ac.icao}`.trim();
+  hud.detailIcao.textContent = ac.icao;
+  hud.detailFl.textContent = ac.geo_alt
+    ? `FL${Math.round((ac.geo_alt * 3.281) / 100)
+        .toString()
+        .padStart(3, "0")}`
+    : "--";
+  hud.detailVel.textContent = ac.velocity ? `${Math.round(ac.velocity * 1.944)} kt` : "--";
+  hud.detailHdg.textContent = ac.heading != null ? `${Math.round(ac.heading)}°` : "--";
+  hud.detailVario.textContent =
+    ac.vertical_rate != null ? `${(ac.vertical_rate * 196.85).toFixed(0)} fpm` : "--";
+  hud.detailOrig.textContent = ac.origin_country || "--";
 
   refreshAttackBanner();
 }
 
-hud.detailClose.addEventListener("click", () => {
-  state.selectedIcao = null;
-  hud.detail.classList.add("hidden");
-  aircraftManager.highlight(null);
-  document
-    .querySelectorAll(".aircraft-row")
-    .forEach((el) => el.classList.remove("selected"));
-  if (cinema.active) {
-    cinema.stop();
-    hud.btnChase.classList.remove("active");
-  }
-});
+aircraftMgr.onClick = (icao) => selectAircraft(icao);
+threatRenderer.onClick = (id) => showThreatDetail(id);
 
-// Click en avión 3D / amenaza → seleccionar y mostrar info
-viewer.screenSpaceEventHandler.setInputAction((click) => {
-  const picked = viewer.scene.pick(click.position);
-  if (!Cesium.defined(picked)) return;
+hud.detailClose.addEventListener("click", () => selectAircraft(null));
 
-  const props = picked.id?.properties;
-  if (!props) return;
-
-  if (props.ac) {
-    selectAircraft(props.ac.getValue());
-    return;
-  }
-  if (props.threatId) {
-    showThreatDetail(props.threatId.getValue());
-  }
-}, Cesium.ScreenSpaceEventType.LEFT_CLICK);
-
-// ── Panel detalle de amenaza ─────────────────────────────────────────────────
-function hexToRgb(hex) {
-  const m = hex.replace("#", "").trim();
-  const full =
-    m.length === 3
-      ? m
-          .split("")
-          .map((c) => c + c)
-          .join("")
-      : m;
-  const num = parseInt(full, 16);
-  return {
-    r: (num >> 16) & 0xff,
-    g: (num >> 8) & 0xff,
-    b: num & 0xff,
-  };
-}
-
+// ── Threat detail panel ──────────────────────────────────────────────────────
 function showThreatDetail(threatId) {
   const t = THREATS[threatId];
   if (!t) return;
-
+  // Color dinámico del panel según el color dominante del emoji de la amenaza
+  const rgb = hexToRgb(colorForThreat(t));
+  if (rgb) {
+    hud.threatDetail.style.setProperty("--tr", rgb.r);
+    hud.threatDetail.style.setProperty("--tg", rgb.g);
+    hud.threatDetail.style.setProperty("--tb", rgb.b);
+  }
+  hud.threatDetail.classList.remove("hidden");
   hud.tdIcon.textContent = t.icon;
   hud.tdName.textContent = t.name;
-  hud.tdRegion.textContent = t.region;
-  hud.tdDesc.textContent = t.desc;
-
+  hud.tdRegion.textContent = t.region || "";
+  hud.tdDesc.textContent = t.desc || "";
   const catMeta = THREAT_CATEGORIES[t.category];
   hud.tdCategory.textContent = catMeta?.label ?? t.category.toUpperCase();
-  hud.tdPower.textContent = "★".repeat(t.power) + "☆".repeat(5 - t.power);
+  hud.tdPower.textContent = "★".repeat(t.power || 1) + "☆".repeat(5 - (t.power || 1));
   hud.tdRadius.textContent = `${t.radius_km} km`;
-  hud.tdLat.textContent = t.lat.toFixed(4) + "°";
-  hud.tdLon.textContent = t.lon.toFixed(4) + "°";
-
-  const isActive = threatMgr.isActive(threatId);
-  hud.tdStatus.textContent = isActive ? "🔴 ACTIVA" : "⚫ INACTIVA";
-  hud.tdStatus.style.color = isActive ? "#ff4477" : "#88aaa0";
-
+  hud.tdStatus.textContent = threatMgr.isActive(threatId) ? "ACTIVA" : "INACTIVA";
+  hud.tdLat.textContent = t.lat.toFixed(3);
+  hud.tdLon.textContent = t.lon.toFixed(3);
   hud.tdFly.dataset.threatId = threatId;
-
-  // Tinta el panel con el color de la amenaza vía CSS custom props.
-  const { r, g, b } = hexToRgb(t.color);
-  hud.threatDetail.style.setProperty("--tr", r);
-  hud.threatDetail.style.setProperty("--tg", g);
-  hud.threatDetail.style.setProperty("--tb", b);
-
-  hud.threatDetail.classList.remove("hidden");
 }
 
 hud.threatDetailClose.addEventListener("click", () => {
   hud.threatDetail.classList.add("hidden");
 });
-
 hud.tdFly.addEventListener("click", () => {
   const id = hud.tdFly.dataset.threatId;
-  const t = THREATS[id];
-  if (!t) return;
-  if (cinema.active) {
-    cinema.stop();
-    document.getElementById("btn-cinema").classList.remove("active");
-  }
-
-  // flyToBoundingSphere encuadra el target dentro del frustum de la cámara,
-  // dejándolo centrado horizontal y verticalmente sin offsets manuales.
-  // El radio de la esfera se basa en el radio de efecto + el alto del beam
-  // para que entren TODOS los elementos 3D de la amenaza.
-  const beamHeight = 60_000 + (t.power || 1) * 40_000;
-  const sphereRadius = Math.max(t.radius_km * 1000 * 1.4, beamHeight * 0.7);
-  const center = Cesium.Cartesian3.fromDegrees(t.lon, t.lat, beamHeight / 2);
-  const sphere = new Cesium.BoundingSphere(center, sphereRadius);
-
-  viewer.camera.flyToBoundingSphere(sphere, {
-    duration: 2.0,
-    offset: new Cesium.HeadingPitchRange(
-      0,
-      Cesium.Math.toRadians(-35),
-      sphereRadius * 3.0,
-    ),
-    complete: () => {
-      // Liberamos la cámara del lookAt automático que mete flyToBoundingSphere
-      // así el usuario puede volver a girar el globo libremente con el mouse.
-      viewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
-    },
-  });
+  if (id) flyToThreat(id);
 });
 
-// ── Banner de ataque + acciones ──────────────────────────────────────────────
+function hexToRgb(hex) {
+  const m = hex.match(/^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i);
+  if (!m) return null;
+  return {
+    r: parseInt(m[1], 16),
+    g: parseInt(m[2], 16),
+    b: parseInt(m[3], 16),
+  };
+}
+
+// ── Attack banner (tiempo restante para rescatar) ────────────────────────────
 function refreshAttackBanner() {
   const icao = state.selectedIcao;
-  if (!icao) {
-    hud.attackBanner.classList.add("hidden");
-    hud.btnRescue.disabled = true;
-    return;
-  }
+  if (!icao) return;
   const info = threatMgr.getAttackInfo(icao);
   if (!info || info.rescued) {
     hud.attackBanner.classList.add("hidden");
     hud.btnRescue.disabled = true;
-    hud.rescueHint.textContent = "Avión sin amenaza activa.";
     return;
   }
   const t = THREATS[info.threatId];
   hud.attackBanner.classList.remove("hidden");
-  hud.attackIcon.textContent = t?.icon || "⚠️";
   hud.attackTitle.textContent = "BAJO ATAQUE";
-  hud.attackSource.textContent = t ? `${t.name} (${t.region})` : "Desconocido";
-  hud.btnRescue.disabled = false;
-
-  const remainingMs = info.deadlineMs - Date.now();
-  const totalMs = info.deadlineMs - info.startedAt;
-  const pct = Math.max(0, Math.min(100, (remainingMs / totalMs) * 100));
+  hud.attackSource.textContent = `${t.icon} ${t.name}`;
+  hud.attackIcon.textContent = t.icon;
+  const remaining = Math.max(0, info.deadlineMs - Date.now());
+  const total = info.deadlineMs - info.startedAt;
+  const pct = Math.max(0, Math.min(100, (remaining / total) * 100));
   hud.timerFill.style.width = `${pct}%`;
-  hud.timerText.textContent = Math.max(0, Math.round(remainingMs / 1000)) + "s";
+  hud.timerText.textContent = `${Math.ceil(remaining / 1000)}s`;
+  hud.btnRescue.disabled = false;
 }
-
-// Refresh banner cada segundo
 setInterval(refreshAttackBanner, 500);
 
-hud.btnFlyTo.addEventListener("click", () => {
-  if (!state.selectedIcao) return;
-  const entity = aircraftManager.getById(state.selectedIcao);
-  if (entity) {
-    viewer
-      .flyTo(entity, {
-        duration: 1.5,
-        offset: new Cesium.HeadingPitchRange(
-          0,
-          Cesium.Math.toRadians(-20),
-          15_000,
-        ),
-      })
-      .then(() => viewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY))
-      .catch(() => {});
-  }
-});
+// ── Layers de globe.gl: aviones + amenazas ───────────────────────────────────
+// pointsData (columnas) + ringsData (pulsos) + htmlElementsData (emoji)
+//
+// globe.gl es eficiente al actualizar layers: solo re-rendea los items
+// nuevos. Pero para que el HEADING del avión se rote, necesitamos forzar
+// una re-aplicación de htmlElementsData en cada poll, porque el callback
+// de htmlElement no se ejecuta de nuevo para items existentes.
+//
+// Estrategia: refrescamos el array completo en cada poll, pero el manager
+// reutiliza el mismo div por icao y solo actualiza sus props (no recrea).
 
-// Toggle chase camera (vista persecución cercana, tipo videojuego).
-hud.btnChase.addEventListener("click", () => {
-  if (!state.selectedIcao) return;
-  if (cinema.isChasing(state.selectedIcao)) {
-    cinema.stop();
-    hud.btnChase.classList.remove("active");
-    document.getElementById("btn-cinema").classList.remove("active");
-  } else {
-    cinema.chaseAircraft(state.selectedIcao);
-    hud.btnChase.classList.add("active");
-    document.getElementById("btn-cinema").classList.remove("active");
-  }
-});
-
-hud.btnRescue.addEventListener("click", () => {
-  if (!state.selectedIcao) return;
-  threatMgr.manualRescue(state.selectedIcao);
-});
-
-// ── Buttons inferiores ───────────────────────────────────────────────────────
-document.getElementById("btn-globe").addEventListener("click", flyToGlobe);
-
-/**
- * "Centrar": preserva la altitud actual pero recentra la cámara mirando
- * perpendicular al suelo y libera el lookAtTransform. Útil cuando la cámara
- * quedó "rara" después de un flyTo a una amenaza o un avión.
- */
-function centerCamera() {
-  if (cinema.active) {
-    cinema.stop();
-    document.getElementById("btn-cinema").classList.remove("active");
-    hud.btnChase.classList.remove("active");
-  }
-  // Reset transform primero para que la posición sea coherente
-  viewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
-
-  const cart = viewer.camera.positionCartographic;
-  const lon = cart ? Cesium.Math.toDegrees(cart.longitude) : 0;
-  const lat = cart ? Cesium.Math.toDegrees(cart.latitude) : 15;
-  const height = cart ? cart.height : 24_000_000;
-
-  viewer.camera.flyTo({
-    destination: Cesium.Cartesian3.fromDegrees(lon, lat, height),
-    orientation: {
-      heading: 0,
-      pitch: Cesium.Math.toRadians(-90),
-      roll: 0,
-    },
-    duration: 1.0,
-    complete: () => viewer.camera.lookAtTransform(Cesium.Matrix4.IDENTITY),
-  });
+function refreshAircraftLayer() {
+  globe
+    .htmlElementsData(getAllHtmlElementsData())
+    .ringsData(getAllRingsData());
+}
+function refreshThreatLayers() {
+  globe
+    .pointsData(threatRenderer.getPointsData())
+    .ringsData(getAllRingsData());
+  globe.htmlElementsData(getAllHtmlElementsData());
 }
 
-document.getElementById("btn-center").addEventListener("click", centerCamera);
-document.getElementById("btn-reset").addEventListener("click", () =>
-  flyToPreset(state.presetKey),
-);
-document.getElementById("btn-cinema").addEventListener("click", () => {
-  const isActive = cinema.toggle();
-  document.getElementById("btn-cinema").classList.toggle("active", isActive);
-});
-// ── Activación masiva de amenazas ────────────────────────────────────────────
-function activateAllThreats(filter = null, { silent = true } = {}) {
-  let count = 0;
-  for (const [id, t] of Object.entries(THREATS)) {
-    if (filter && t.category !== filter) continue;
-    if (!threatMgr.isActive(id)) {
-      threatMgr.toggleThreat(id, { silent });
-      count++;
+// Rings combinados: amenazas (anillos lentos amplios) + aviones bajo ataque
+// (anillos rápidos rojos pequeños) + escudos de rescate (anillos verdes
+// efímeros que celebran un rescate exitoso, estilo earth-shield).
+function getAllRingsData() {
+  return [
+    ...threatRenderer.getRingsData(),
+    ...aircraftMgr.getAttackedRingsData(),
+    ...getRescueShieldsData(),
+  ];
+}
+
+// Escudos de rescate: cuando el jugador rescata un avión, aparece sobre su
+// posición un escudo verde que pulsa durante ~2 segundos y luego se va.
+const activeShields = new Map(); // icao -> {lat, lng, expireAt}
+const SHIELD_DURATION_MS = 2200;
+
+function spawnRescueShield(ac) {
+  if (!ac || ac.lat == null || ac.lon == null) return;
+  activeShields.set(ac.icao, {
+    icao: ac.icao,
+    lat: ac.lat,
+    lng: ac.lon,
+    expireAt: Date.now() + SHIELD_DURATION_MS,
+  });
+  refreshAircraftLayer();
+  // Auto-cleanup
+  setTimeout(() => {
+    const s = activeShields.get(ac.icao);
+    if (s && Date.now() >= s.expireAt) {
+      activeShields.delete(ac.icao);
+      refreshAircraftLayer();
     }
-  }
-  syncThreatUI();
-  return count;
+  }, SHIELD_DURATION_MS + 100);
 }
 
-function deactivateAllThreats() {
-  for (const id of [...threatMgr.activeThreats.keys()]) {
-    threatMgr.toggleThreat(id, { silent: true });
+function getRescueShieldsData() {
+  const out = [];
+  const now = Date.now();
+  for (const s of activeShields.values()) {
+    if (now >= s.expireAt) continue;
+    out.push({
+      kind: "shield",
+      icao: s.icao,
+      lat: s.lat,
+      lng: s.lng,
+      // Anillo grande, propagación rápida, repite seguido (efecto burst).
+      maxR: 6,
+      propagationSpeed: 14,
+      repeatPeriod: 250,
+      altitude: 0.025, // por encima del globo, tipo aura
+      color: "#00ff7f",
+    });
   }
-  syncThreatUI();
+  return out;
 }
 
-function syncThreatUI() {
-  threatRenderer.syncWithActive([...threatMgr.activeThreats.keys()]);
-  document.querySelectorAll(".threat-row").forEach((el) => {
-    el.classList.toggle("active", threatMgr.isActive(el.dataset.threat));
+// Interpolador de color: recibe un color hex y devuelve una función t→rgba
+// con alpha decreciente (sqrt(1-t)) para el efecto de "ripple" que se desvanece.
+function ringColorInterpolator(hex) {
+  const rgb = hexToRgb(hex) || { r: 255, g: 255, b: 255 };
+  return (t) => `rgba(${rgb.r},${rgb.g},${rgb.b},${Math.sqrt(1 - t)})`;
+}
+
+// Combinamos aviones + amenazas en una sola lista de htmlElements.
+// Usamos un campo `__kind` para dispatcher al element builder correcto.
+function getAllHtmlElementsData() {
+  const planes = aircraftMgr.getHtmlElementsData().map((d) => ({
+    ...d,
+    __kind: "plane",
+  }));
+  const threats = threatRenderer.getHtmlElementsData().map((d) => ({
+    ...d,
+    __kind: "threat",
+  }));
+  return [...planes, ...threats];
+}
+
+const planeBuilder = aircraftMgr.getElementBuilder();
+const threatBuilder = threatRenderer.getElementBuilder();
+
+globe
+  // Columnas verticales para amenazas
+  .pointLat("lat")
+  .pointLng("lng")
+  .pointAltitude("altitude")
+  .pointColor("color")
+  .pointRadius((d) => d.radius || 0.4)
+  .pointResolution(8)
+  .pointsData([])
+
+  // Anillos pulsantes (amenazas, aviones bajo ataque y escudos de rescate)
+  .ringLat("lat")
+  .ringLng("lng")
+  .ringAltitude((d) => d.altitude || 0)
+  .ringMaxRadius("maxR")
+  .ringPropagationSpeed("propagationSpeed")
+  .ringRepeatPeriod("repeatPeriod")
+  .ringColor((d) => ringColorInterpolator(d.color))
+  .ringsData([])
+
+  // HTML markers (aviones + emoji de amenaza)
+  .htmlLat("lat")
+  .htmlLng("lng")
+  .htmlAltitude("alt")
+  .htmlElement((d) => (d.__kind === "plane" ? planeBuilder(d) : threatBuilder(d)))
+  .htmlElementsData([]);
+
+// ── Render lists del HUD lateral ─────────────────────────────────────────────
+function renderAircraftList(aircraft) {
+  if (!aircraft.length) {
+    hud.aircraftList.innerHTML = '<div class="empty">Sin tráfico</div>';
+    return;
+  }
+  // Top 30, ordenados por bajo ataque primero, luego alfabético
+  const sorted = [...aircraft]
+    .sort((a, b) => {
+      const aA = threatMgr.isUnderAttack(a.icao) ? 1 : 0;
+      const bA = threatMgr.isUnderAttack(b.icao) ? 1 : 0;
+      if (aA !== bA) return bA - aA;
+      return (a.callsign || "").localeCompare(b.callsign || "");
+    })
+    .slice(0, 30);
+
+  hud.aircraftList.innerHTML = sorted
+    .map((ac) => {
+      const flag = flagFor(ac.origin_country) || "";
+      const attacked = threatMgr.isUnderAttack(ac.icao) ? " attacked" : "";
+      const sel = state.selectedIcao === ac.icao ? " selected" : "";
+      const fl = ac.geo_alt
+        ? `FL${Math.round((ac.geo_alt * 3.281) / 100)
+            .toString()
+            .padStart(3, "0")}`
+        : "--";
+      return `<div class="aircraft-row${attacked}${sel}" data-icao="${ac.icao}">
+        <span class="flag">${flag}</span>
+        <span class="cs">${ac.callsign || ac.icao}</span>
+        <span class="alt">${fl}</span>
+      </div>`;
+    })
+    .join("");
+
+  hud.aircraftList.querySelectorAll(".aircraft-row").forEach((el) => {
+    el.addEventListener("click", () => selectAircraft(el.dataset.icao));
   });
 }
 
-document
-  .getElementById("btn-clear-threats")
-  .addEventListener("click", deactivateAllThreats);
-
-document
-  .getElementById("btn-all-threats")
-  .addEventListener("click", () => activateAllThreats());
-
-document
-  .getElementById("threats-all-on")
-  .addEventListener("click", () => activateAllThreats());
-
-document
-  .getElementById("threats-all-off")
-  .addEventListener("click", deactivateAllThreats);
-
-document.querySelectorAll(".threats-btn.cat").forEach((btn) => {
-  btn.addEventListener("click", () => activateAllThreats(btn.dataset.cat));
-});
-
-// Toggle mute de sonidos
-const btnMute = document.getElementById("btn-mute");
-btnMute.addEventListener("click", () => {
-  setMuted(!isMuted());
-  btnMute.textContent = isMuted() ? "🔇" : "🔊";
-  btnMute.title = isMuted() ? "Activar sonidos" : "Silenciar sonidos";
-});
-
-const btnMode = document.getElementById("btn-mode");
-function refreshModeButton() {
-  if (state.mode === "SIM") {
-    btnMode.textContent = "🎮 SIM";
-    btnMode.classList.remove("active");
-  } else {
-    btnMode.textContent = "📡 LIVE";
-    btnMode.classList.add("active");
-  }
+function renderPresetsList() {
+  const html = Object.entries(REGIONES)
+    .map(([region, keys]) => {
+      const rows = keys
+        .map((k) => {
+          const p = PRESETS[k];
+          if (!p) return "";
+          return `<div class="preset-row" data-preset="${k}">
+            <span class="icao">${p.icao}</span>
+            <span class="name">${p.label}</span>
+          </div>`;
+        })
+        .join("");
+      return `<div class="preset-region">
+        <div class="region-label">${region}</div>
+        ${rows}
+      </div>`;
+    })
+    .join("");
+  hud.presetsList.innerHTML = html;
+  hud.presetsList.querySelectorAll(".preset-row").forEach((el) => {
+    el.addEventListener("click", () => flyToPreset(el.dataset.preset));
+  });
 }
-btnMode.addEventListener("click", () => {
-  state.mode = state.mode === "SIM" ? "LIVE" : "SIM";
-  refreshModeButton();
-  // Limpiar entities cuando cambia el modo
-  aircraftManager.clearAll?.();
-  restartPollLoop();
-});
-refreshModeButton();
+renderPresetsList();
 
-// ── ThreatManager callbacks ──────────────────────────────────────────────────
+function renderThreatsList() {
+  const grouped = { ufo: [], paranormal: [], creature: [] };
+  for (const [id, t] of Object.entries(THREATS)) {
+    grouped[t.category].push({ id, ...t });
+  }
+  let html = "";
+  for (const cat of ["ufo", "paranormal", "creature"]) {
+    const meta = THREAT_CATEGORIES[cat];
+    html += `<div class="threat-category"><div class="region-label">${meta.icon} ${meta.label}</div>`;
+    html += grouped[cat]
+      .map((t) => {
+        const active = threatMgr.isActive(t.id) ? " active" : "";
+        const c = colorForThreat(t);
+        return `<div class="threat-row${active}" data-threat="${t.id}" style="--threat-row-color:${c}">
+          <span class="threat-icon-small">${t.icon}</span>
+          <span class="threat-name">${t.name}</span>
+          <span class="threat-power">★${t.power}</span>
+        </div>`;
+      })
+      .join("");
+    html += "</div>";
+  }
+  hud.threatsList.innerHTML = html;
+  hud.threatsList.querySelectorAll(".threat-row").forEach((el) => {
+    el.addEventListener("click", () => {
+      const id = el.dataset.threat;
+      if (threatMgr.isActive(id)) {
+        threatMgr.toggleThreat(id);
+        threatRenderer.hideThreat(id);
+      } else {
+        threatMgr.toggleThreat(id);
+        threatRenderer.showThreat(id);
+      }
+      el.classList.toggle("active");
+      refreshThreatLayers();
+    });
+  });
+}
+renderThreatsList();
+
+// ── Tabs del sidebar ─────────────────────────────────────────────────────────
+document.querySelectorAll(".hud-tabs .tab").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".hud-tabs .tab").forEach((b) => b.classList.remove("active"));
+    btn.classList.add("active");
+    document.querySelectorAll(".tab-content").forEach((c) => c.classList.remove("active"));
+    const t = btn.dataset.tab;
+    document.querySelector(`.tab-content[data-tab="${t}"]`).classList.add("active");
+  });
+});
+
+// ── State callbacks del threatManager ────────────────────────────────────────
 threatMgr.callbacks.onState = (s) => {
   hud.score.textContent = s.score;
-  hud.lives.textContent =
-    "❤".repeat(s.lives) + "♡".repeat(Math.max(0, 3 - s.lives));
+  hud.lives.textContent = "❤".repeat(Math.max(0, s.lives)) + "🤍".repeat(Math.max(0, 3 - s.lives));
   hud.rescued.textContent = s.rescued;
   hud.lost.textContent = s.lost;
   hud.attacked.textContent = s.attackedCount;
 };
 
-// Throttle de sonido de ataque: con SIM y muchas amenazas activas se podrían
-// disparar varios eventos por segundo; limitamos a 1 sonido cada 1.2s.
-let lastAttackSoundAt = 0;
-
 threatMgr.callbacks.onEvent = (ev) => {
-  showToast(ev);
   appendComms(ev);
-
-  switch (ev.type) {
-    case "AIRCRAFT_ATTACK": {
-      const now = Date.now();
-      if (now - lastAttackSoundAt > 1200) {
-        playAttackSound();
-        lastAttackSoundAt = now;
-      }
-      break;
+  if (ev.type === "AIRCRAFT_ATTACK") {
+    const now = Date.now();
+    if (now - state.lastAttackSoundAt > 1500) {
+      playAttackSound();
+      state.lastAttackSoundAt = now;
     }
-    case "RESCUE_OK":
-      playRescueSound();
-      break;
-    case "LOST":
-      playLostSound();
-      break;
-    case "GAME_OVER":
-      playGameOverSound();
-      break;
+    showToast(ev.msg, "warn");
+  } else if (ev.type === "RESCUE_OK") {
+    playRescueSound();
+    showToast(ev.msg, "ok");
+    if (ev.ac) spawnRescueShield(ev.ac);
+  } else if (ev.type === "LOST") {
+    playLostSound();
+    showToast(ev.msg, "danger");
+  } else if (ev.type === "GAME_OVER") {
+    playGameOverSound();
+    showToast(ev.msg, "danger");
+  } else if (ev.type === "RESCUE_FAR") {
+    showToast(ev.msg, "warn");
+  } else if (ev.type === "ATTACK") {
+    showToast(ev.msg, "warn");
   }
 };
 
-function showToast(ev) {
-  let cls = "info";
-  if (ev.type === "RESCUE_OK") cls = "success";
-  else if (ev.type === "LOST" || ev.type === "GAME_OVER") cls = "danger";
-  else if (ev.type === "ATTACK" || ev.type === "AIRCRAFT_ATTACK")
-    cls = "warning";
-
+function showToast(msg, kind = "info") {
   const div = document.createElement("div");
-  div.className = `toast ${cls}`;
-  div.textContent = ev.msg;
+  div.className = `toast toast-${kind}`;
+  div.textContent = msg;
   hud.toastStack.appendChild(div);
   setTimeout(() => div.remove(), 4500);
 }
@@ -786,16 +640,15 @@ function appendComms(ev) {
   hud.commsLog.insertAdjacentHTML("afterbegin", html);
 }
 
-// ── Loop de polling (SIM o LIVE) ─────────────────────────────────────────────
+// ── Game loop ────────────────────────────────────────────────────────────────
 async function pollOnce() {
   let aircraft;
   if (state.mode === "SIM") {
-    // Mostrar TODOS los aviones del simulador (no filtrar por bbox)
     aircraft = simulator.getAircraft();
     hud.api.textContent = "SIM";
     hud.api.style.color = "#ffaa00";
   } else {
-    const result = await fetchAircraft(state.preset.bbox);
+    const result = await fetchAircraft({ lamin: -90, lamax: 90, lomin: -180, lomax: 180 });
     if (!result.ok) {
       hud.api.textContent = result.status === 429 ? "RATE_LIMIT" : "ERR";
       hud.api.style.color = "#ff8080";
@@ -806,16 +659,15 @@ async function pollOnce() {
       result.creditsRemaining != null ? `${result.creditsRemaining}` : "OK";
     hud.api.style.color = "#00ff7f";
   }
-
   state.lastAircraftList = aircraft;
-  aircraftManager.upsert(aircraft);
+  aircraftMgr.upsert(aircraft);
   threatMgr.updateAttacks(aircraft);
-  aircraftManager.setAttackedIcaos(
-    threatMgr.attackedList().map((i) => i.ac.icao),
-  );
-  hud.aviones.textContent = aircraftManager.count();
+  aircraftMgr.setAttackedIcaos(threatMgr.attackedList().map((i) => i.ac.icao));
+  hud.aviones.textContent = aircraftMgr.count();
   renderAircraftList(aircraft);
+  refreshAircraftLayer();
 }
+
 
 let pollHandle = null;
 function restartPollLoop() {
@@ -824,21 +676,134 @@ function restartPollLoop() {
   const ms = state.mode === "SIM" ? state.simIntervalMs : state.pollIntervalMs;
   pollHandle = setInterval(pollOnce, ms);
 }
-restartPollLoop();
 
-// Tick más rápido para timers de rescate y proximidad de cámara (1 Hz)
+// Tick más rápido para timers de rescate (no necesita poll de aviones)
 setInterval(() => {
   threatMgr.tick();
-  aircraftManager.setAttackedIcaos(
-    threatMgr.attackedList().map((i) => i.ac.icao),
-  );
+  aircraftMgr.setAttackedIcaos(threatMgr.attackedList().map((i) => i.ac.icao));
+  refreshAttackBanner();
+  refreshAircraftLayer();
 }, 1000);
 
-// Encender todas las amenazas por default — el caos paranormal arranca activo.
-activateAllThreats();
+// ── Botones de acción ────────────────────────────────────────────────────────
+hud.btnFlyTo.addEventListener("click", () => {
+  if (state.selectedIcao) flyToAircraft(state.selectedIcao);
+});
+
+hud.btnRescue.addEventListener("click", () => {
+  if (!state.selectedIcao) return;
+  threatMgr.manualRescue(state.selectedIcao);
+});
+
+// ── Activación masiva de amenazas ────────────────────────────────────────────
+function activateAllThreats(filter = null, { silent = true } = {}) {
+  let count = 0;
+  for (const [id, t] of Object.entries(THREATS)) {
+    if (filter && t.category !== filter) continue;
+    if (!threatMgr.isActive(id)) {
+      threatMgr.toggleThreat(id, { silent });
+      threatRenderer.showThreat(id);
+      count++;
+    }
+  }
+  refreshThreatLayers();
+  renderThreatsList();
+  return count;
+}
+function deactivateAllThreats() {
+  let count = 0;
+  for (const id of Object.keys(THREATS)) {
+    if (threatMgr.isActive(id)) {
+      threatMgr.toggleThreat(id);
+      threatRenderer.hideThreat(id);
+      count++;
+    }
+  }
+  refreshThreatLayers();
+  renderThreatsList();
+  return count;
+}
+
+document.getElementById("threats-all-on").addEventListener("click", () => {
+  activateAllThreats(null, { silent: false });
+});
+document.getElementById("threats-all-off").addEventListener("click", () => {
+  deactivateAllThreats();
+});
+document.querySelectorAll(".threats-btn.cat").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    activateAllThreats(btn.dataset.cat, { silent: false });
+  });
+});
+
+// ── Mute toggle ──────────────────────────────────────────────────────────────
+const btnMute = document.getElementById("btn-mute");
+btnMute.addEventListener("click", () => {
+  const muted = !isMuted();
+  setMuted(muted);
+  btnMute.textContent = muted ? "🔇" : "🔊";
+  btnMute.classList.toggle("active", muted);
+});
+
+// ── Auto-rotate toggle ───────────────────────────────────────────────────────
+const btnRotate = document.getElementById("btn-rotate");
+// Estado inicial: prendido (boot ya seteó controls.autoRotate = true)
+btnRotate.classList.add("active-rotate");
+btnRotate.addEventListener("click", () => {
+  controls.autoRotate = !controls.autoRotate;
+  userToggledRotate = controls.autoRotate; // marcar que el user eligió esto adrede
+  btnRotate.classList.toggle("active-rotate", controls.autoRotate);
+});
+
+// ── Mobile: hamburger menu / sidebar toggle ─────────────────────────────────
+const btnMenu = document.getElementById("btn-menu");
+const sidebarEl = document.getElementById("hud-side");
+// backdrop dinámico (solo se inserta una vez)
+const sideBackdrop = document.createElement("div");
+sideBackdrop.className = "side-backdrop";
+document.body.appendChild(sideBackdrop);
+
+function openSidebar() {
+  sidebarEl.classList.add("open");
+  sideBackdrop.classList.add("visible");
+}
+function closeSidebar() {
+  sidebarEl.classList.remove("open");
+  sideBackdrop.classList.remove("visible");
+}
+function toggleSidebar() {
+  if (sidebarEl.classList.contains("open")) closeSidebar();
+  else openSidebar();
+}
+
+btnMenu?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  toggleSidebar();
+});
+sideBackdrop.addEventListener("click", closeSidebar);
+
+function isMobileLayout() {
+  return window.matchMedia("(max-width: 900px)").matches;
+}
+
+// Cerrar el sidebar automáticamente cuando el usuario toca un avión, zona o
+// amenaza desde la lista (en mobile el panel tapaba todo el globo).
+sidebarEl.addEventListener("click", (ev) => {
+  const target = ev.target.closest(
+    ".aircraft-row, .preset-row, .threat-row"
+  );
+  if (target && isMobileLayout()) {
+    setTimeout(closeSidebar, 80);
+  }
+});
+
+// ── Boot ─────────────────────────────────────────────────────────────────────
+flyToGlobe();
+activateAllThreats(null, { silent: true });
+restartPollLoop();
 
 console.log("[paranormal-hunt] init OK", {
-  preset: state.preset.label,
+  preset: state.preset?.label,
   threatsAvailable: Object.keys(THREATS).length,
   threatsActive: threatMgr.activeThreats.size,
 });

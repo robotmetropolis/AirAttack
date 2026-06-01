@@ -2,29 +2,39 @@
 <html lang="es">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>PARANORMAL HUNT — Rescue Live Aircraft</title>
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no"
+    />
+    <meta name="theme-color" content="#000000" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <title>PARANORMAL HUNT — Globe Edition</title>
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
-    <!-- Globo 3D Cesium -->
-    <div id="cesiumContainer"></div>
+    <!-- Globo 3D (globe.gl + three.js) -->
+    <div id="globeContainer"></div>
 
     <!-- HUD Top Bar -->
     <header class="hud-top">
       <div class="hud-brand">
+        <button class="hud-icon-btn btn-menu" id="btn-menu" title="Mostrar / ocultar panel lateral" aria-label="Menú">☰</button>
         <span class="dot pulse"></span>
-        <span id="hud-title">BUENOS AIRES TMA</span>
+        <span id="hud-title">PARANORMAL HUNT</span>
       </div>
       <div class="hud-stats">
-        <span>SCORE <strong id="stat-score">0</strong></span>
-        <span>LIVES <strong id="stat-lives">❤❤❤</strong></span>
-        <span>RES <strong id="stat-rescued">0</strong></span>
-        <span>LOST <strong id="stat-lost">0</strong></span>
-        <span>AVI <strong id="stat-aviones">0</strong></span>
-        <span>ATK <strong id="stat-attacked">0</strong></span>
-        <span>API <strong id="stat-api">--</strong></span>
-        <span>UTC <strong id="stat-utc">--:--:--</strong></span>
+        <span title="Puntos acumulados por rescates exitosos">SCORE <strong id="stat-score">0</strong></span>
+        <span title="Vidas restantes (perdés una al perder un avión)">LIVES <strong id="stat-lives">❤❤❤</strong></span>
+        <span class="hide-mobile" title="Aviones rescatados">RES <strong id="stat-rescued">0</strong></span>
+        <span class="hide-mobile" title="Aviones perdidos (atrapados sin rescatar a tiempo)">LOST <strong id="stat-lost">0</strong></span>
+        <span class="hide-mobile" title="Aviones en vuelo en el globo">AVI <strong id="stat-aviones">0</strong></span>
+        <span title="Aviones bajo ataque ahora">ATK <strong id="stat-attacked">0</strong></span>
+        <span class="hide-mobile" title="Fuente de datos: SIM (simulado) o LIVE (OpenSky)">API <strong id="stat-api">--</strong></span>
+        <span class="hide-mobile" title="Hora UTC">UTC <strong id="stat-utc">--:--:--</strong></span>
+        <button class="hud-icon-btn" id="btn-mute" title="Silenciar sonidos">🔊</button>
+        <button class="hud-icon-btn" id="btn-rotate" title="Rotación automática del globo">🔄</button>
       </div>
     </header>
 
@@ -98,37 +108,16 @@
 
       <!-- Acciones de rescate -->
       <div class="rescue-panel">
-        <button class="btn-rescue" id="btn-fly-to">🎯 IR AL AVIÓN</button>
-        <button class="btn-rescue purple" id="btn-chase">👁 SEGUIR (CHASE)</button>
+        <button class="btn-rescue" id="btn-fly-to">🎯 CENTRAR</button>
         <button class="btn-rescue green" id="btn-rescue" disabled>
           🛟 RESCATAR
         </button>
         <p class="rescue-hint" id="rescue-hint">
-          Acercate al avión (&lt; 100 km) y tocá RESCATAR. Si dejás la cámara
-          a &lt; 12 km se rescata solo (excepto en modo chase 👁).
+          Click en RESCATAR para liberar al avión bajo ataque.
         </p>
       </div>
     </section>
 
-    <!-- Bottom action bar -->
-    <footer class="hud-bottom">
-      <button class="btn" id="btn-globe">🌍 Globo</button>
-      <button class="btn" id="btn-center">🎯 Centrar</button>
-      <button class="btn" id="btn-reset">↺ Reset</button>
-      <button class="btn" id="btn-cinema">🎬 Cinema</button>
-      <button class="btn warn" id="btn-all-threats">🔥 All On</button>
-      <button class="btn danger" id="btn-clear-threats">☠ Stop Threats</button>
-      <button class="btn" id="btn-mute" title="Silenciar sonidos">🔊</button>
-      <button class="btn mode-toggle" id="btn-mode" data-mode="SIM">
-        🎮 SIM
-      </button>
-      <span class="hud-divider"></span>
-      <div class="imagery-switcher" id="imagery-switcher">
-        <!-- Generado dinámicamente -->
-      </div>
-      <span class="separator"></span>
-      <span class="hud-region" id="hud-region">Argentina</span>
-    </footer>
 
     <!-- Panel detalle de amenaza (al click sobre un threat en el globo) -->
     <section class="threat-detail hidden" id="threat-detail">

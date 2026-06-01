@@ -371,4 +371,42 @@ export class Simulator {
     this.numFlights = Math.max(10, Math.min(500, n));
     this._regen();
   }
+
+  /**
+   * Devuelve las rutas activas con posición actual (para dividir el arc
+   * en "recorrido" vs "por recorrer"). Sólo tiene sentido en modo SIM:
+   * la API real de OpenSky no expone routes.
+   */
+  getRoutes() {
+    const now = Date.now();
+    const out = [];
+    for (const f of this.flights) {
+      const elapsed = (now - f.startedAt) / 1000;
+      const progress = Math.min(0.999, Math.max(0.001, elapsed / f.durationS));
+      const { lat, lon } = gcInterp(
+        f.origin.lat,
+        f.origin.lon,
+        f.destination.lat,
+        f.destination.lon,
+        progress,
+      );
+      out.push({
+        icao: f.icao,
+        callsign: f.callsign,
+        airline: f.airline,
+        srcLat: f.origin.lat,
+        srcLng: f.origin.lon,
+        srcIata: f.origin.icao,
+        srcName: f.origin.name,
+        curLat: lat,
+        curLng: lon,
+        dstLat: f.destination.lat,
+        dstLng: f.destination.lon,
+        dstIata: f.destination.icao,
+        dstName: f.destination.name,
+        progress,
+      });
+    }
+    return out;
+  }
 }

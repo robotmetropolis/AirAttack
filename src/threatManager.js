@@ -5,7 +5,6 @@
 // - airbornesUnderAttack: Map<icao, { acid, threatId, startedAt, deadline, rescued }>
 // - score, lives, rescuedCount, lostCount
 
-import * as Cesium from "cesium";
 import { THREATS } from "./threats.js";
 
 // Tiempo (segundos) que tiene el player para rescatar antes de "perder" el avión
@@ -14,6 +13,10 @@ const RESCUE_TIMEOUT_S = 90;
 const RESCUE_RANGE_M = 12_000;
 // Cooldown entre rescates manuales (s)
 const RESCUE_COOLDOWN_S = 2;
+// Inmunidad post-rescate: cuando rescatás un avión, queda blindado contra
+// la MISMA amenaza por este tiempo. Así evitás que si el avión sigue dentro
+// del radio de la amenaza después del rescate, vuelva a caer atrapado al instante.
+const POST_RESCUE_IMMUNITY_S = 60;
 
 function distanceKm(lat1, lon1, lat2, lon2) {
   const R = 6371;
@@ -32,6 +35,10 @@ export class ThreatManager {
     this.viewer = viewer;
     this.activeThreats = new Map(); // threatId -> {threat, activatedAt}
     this.attacked = new Map(); // icao -> {ac, threatId, startedAt, deadlineMs}
+    // Mapa de inmunidades post-rescate: clave "icao|threatId" -> expireAtMs.
+    // Mientras el timestamp actual sea menor a expireAtMs, ignoramos esa
+    // combinación de avión+amenaza al detectar nuevos ataques.
+    this.rescueImmunity = new Map();
     this.score = 0;
     this.lives = 3;
     this.rescuedCount = 0;
@@ -83,12 +90,20 @@ export class ThreatManager {
   updateAttacks(aircraft) {
     const now = Date.now();
 
-    // 1) Para cada avión, verificar si está dentro del radio de alguna amenaza activa
+    // Limpieza de inmunidades vencidas (evita que el Map crezca indefinidamente).
+    for (const [key, expireAt] of this.rescueImmunity.entries()) {
+      if (now > expireAt) this.rescueImmunity.delete(key);
+    }
+
+    // 1) Para cada avión, verificar si está dentro del radio de alguna amenaza activa.
+    //    Excluimos las amenazas para las cuales este avión tiene inmunidad reciente.
     for (const ac of aircraft) {
       if (ac.on_ground) continue;
       let closestThreat = null;
       let closestDist = Infinity;
       for (const { threat, id } of this.activeThreats.values()) {
+        const immKey = `${ac.icao}|${id}`;
+        if (this.rescueImmunity.has(immKey)) continue;
         const d = distanceKm(ac.lat, ac.lon, threat.lat, threat.lon);
         if (d <= threat.radius_km && d < closestDist) {
           closestDist = d;
@@ -137,7 +152,6 @@ export class ThreatManager {
 
   _tickRescues() {
     const now = Date.now();
-    const cameraPos = this._cameraGeodetic();
 
     for (const [icao, info] of [...this.attacked.entries()]) {
       if (info.rescued) {
@@ -161,20 +175,9 @@ export class ThreatManager {
         continue;
       }
 
-      // Rescate pasivo: la cámara está cerca del avión durante el ataque.
-      // Se desactiva cuando hay un chase activo para no rescatar de forma
-      // accidental al observar al avión bajo ataque.
-      if (this.proximityRescueEnabled && cameraPos) {
-        const d = distanceKm(
-          cameraPos.lat,
-          cameraPos.lon,
-          info.ac.lat,
-          info.ac.lon,
-        );
-        if (d * 1000 <= RESCUE_RANGE_M) {
-          this._completeRescue(icao, "PROXIMITY");
-        }
-      }
+      // El rescate por proximidad de cámara estaba pensado para Cesium con
+      // chase camera. Globe-edition es siempre vista global, sólo rescate
+      // manual (botón). El flag queda para tests/legacy pero no se usa.
     }
   }
 
@@ -188,22 +191,8 @@ export class ThreatManager {
     if (now - this._lastRescueAt < RESCUE_COOLDOWN_S * 1000) return false;
     const info = this.attacked.get(icao);
     if (!info || info.rescued) return false;
-    const cameraPos = this._cameraGeodetic();
-    if (cameraPos) {
-      const d = distanceKm(
-        cameraPos.lat,
-        cameraPos.lon,
-        info.ac.lat,
-        info.ac.lon,
-      );
-      if (d > 100) {
-        this._emitEvent(
-          "RESCUE_FAR",
-          `Acercate a ${info.ac.callsign} (${d.toFixed(0)} km)`,
-        );
-        return false;
-      }
-    }
+    // Globe-edition: rescate sin condición de distancia (todo es vista global).
+    // El cooldown corto (2 s) evita spam de clicks.
     this._lastRescueAt = now;
     this._completeRescue(icao, "MANUAL");
     return true;
@@ -217,9 +206,14 @@ export class ThreatManager {
     const points = mode === "MANUAL" ? 75 : 50;
     this.score += points;
     this.rescuedCount++;
+    // Inmunidad temporal: el avión queda blindado contra esta MISMA amenaza
+    // durante POST_RESCUE_IMMUNITY_S segundos para que pueda alejarse del radio.
+    const immKey = `${icao}|${info.threatId}`;
+    this.rescueImmunity.set(immKey, info.rescuedAt + POST_RESCUE_IMMUNITY_S * 1000);
     this._emitEvent(
       "RESCUE_OK",
       `✅ ${info.ac.callsign} RESCATADO (+${points})`,
+      { ac: info.ac },
     );
   }
 
@@ -237,21 +231,12 @@ export class ThreatManager {
   }
 
   // ─── Helpers ────────────────────────────────────────────────────────────
-  _cameraGeodetic() {
-    const cart = this.viewer.camera.positionCartographic;
-    if (!cart) return null;
-    return {
-      lat: Cesium.Math.toDegrees(cart.latitude),
-      lon: Cesium.Math.toDegrees(cart.longitude),
-    };
-  }
-
   _threatName(id) {
     return THREATS[id]?.name || id;
   }
 
-  _emitEvent(type, msg) {
-    this.callbacks.onEvent?.({ type, msg, t: new Date() });
+  _emitEvent(type, msg, extra = {}) {
+    this.callbacks.onEvent?.({ type, msg, t: new Date(), ...extra });
   }
 
   _notifyState() {
