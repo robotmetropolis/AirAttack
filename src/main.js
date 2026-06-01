@@ -213,7 +213,15 @@ function flyToPreset(presetKey) {
 function flyToAircraft(icao) {
   const ac = aircraftMgr.getById(icao);
   if (!ac) return;
-  flyTo(ac.lat, ac.lon, 0.18, 1400);
+  // Offset hacia el sur (latitud menor) para que el avión quede en el tercio
+  // superior de la pantalla, así el panel de detalle (bottom-sheet en mobile)
+  // no lo tapa. El centro de la cámara queda apuntando un poco más abajo.
+  const altitude = 0.18;
+  const latOffset = 7;
+  let centerLat = ac.lat - latOffset;
+  if (centerLat < -85) centerLat = -85;
+  if (centerLat > 85) centerLat = 85;
+  flyTo(centerLat, ac.lon, altitude, 1400);
 }
 
 function flyToThreat(threatId) {
@@ -626,6 +634,9 @@ threatMgr.callbacks.onState = (s) => {
   hud.rescued.textContent = s.rescued;
   hud.lost.textContent = s.lost;
   hud.attacked.textContent = s.attackedCount;
+  // En mobile el botón hamburguesa titila rojo cuando hay ataques activos
+  // para llamar la atención del jugador hacia el listado de aviones.
+  document.getElementById("btn-menu")?.classList.toggle("alert", s.attackedCount > 0);
 };
 
 threatMgr.callbacks.onEvent = (ev) => {

@@ -22,6 +22,27 @@ html, body {
 /* Botón hamburguesa: solo visible en mobile (override en media query) */
 .btn-menu { display: none; }
 
+/* Cuando hay aviones bajo ataque, el menú lateral guarda info crítica
+ * (lista de ataques, botón rescatar). En mobile el botón hamburguesa
+ * empieza a titilar en rojo para llamar la atención del jugador. */
+.btn-menu.alert {
+  border-color: rgba(255, 64, 64, 0.85) !important;
+  color: #ff5050 !important;
+  background: rgba(255, 64, 64, 0.18) !important;
+  animation: menu-alert-blink 0.9s ease-in-out infinite;
+}
+
+@keyframes menu-alert-blink {
+  0%, 100% {
+    box-shadow: 0 0 0 rgba(255, 64, 64, 0);
+    background: rgba(255, 64, 64, 0.18);
+  }
+  50% {
+    box-shadow: 0 0 14px rgba(255, 64, 64, 0.9);
+    background: rgba(255, 64, 64, 0.45);
+  }
+}
+
 /* Datos numéricos / técnicos: mantenemos monospace para alineación */
 .mono, .stat-value, .detail-grid span, .preset-row .icao,
 .aircraft-row .alt, .timer-text {
