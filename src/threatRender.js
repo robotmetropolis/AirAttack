@@ -11,6 +11,7 @@
 // de Three.js, usando solo las primitivas que globe.gl ya optimiza.
 
 import { THREATS } from "./threats.js";
+import { loadThreatImage } from "./threatImage.js";
 
 const COLOR_BY_CATEGORY = {
   ufo: "#00ffff",
@@ -235,11 +236,34 @@ export class ThreatRenderer {
           this.onClick?.(d.threatId);
         });
 
+        // Intentar reemplazar el emoji por una imagen real si existe en
+        // public/threats/<id>.png|jpg|webp. El fondo negro se hace
+        // transparente automáticamente. Si no hay archivo, queda el emoji.
+        loadThreatImage(d.threatId)
+          .then((dataUrl) => {
+            if (!dataUrl) return;
+            const img = document.createElement("img");
+            img.src = dataUrl;
+            img.alt = "";
+            img.draggable = false;
+            img.className = "threat-img";
+            icon.textContent = "";
+            icon.appendChild(img);
+            icon.classList.add("has-image");
+          })
+          .catch(() => {
+            /* fallback al emoji, ya está */
+          });
+
         this._domCache.set(d.threatId, div);
       }
       const t = d.threat;
       div.style.setProperty("--threat-color", d.color);
-      div.querySelector('[data-role="icon"]').textContent = t.icon || "?";
+      const iconEl = div.querySelector('[data-role="icon"]');
+      // Solo seteamos el emoji mientras no hayamos cargado la imagen.
+      if (!iconEl.classList.contains("has-image")) {
+        iconEl.textContent = t.icon || "?";
+      }
       div.querySelector('[data-role="label"]').textContent = t.name || "";
       div.dataset.category = t.category;
       return div;

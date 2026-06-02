@@ -102,6 +102,26 @@ controls.dampingFactor = 0.08;
 controls.rotateSpeed = 0.6;
 controls.zoomSpeed = 0.9;
 
+// ── Sizing dinámico de las amenazas ─────────────────────────────────────────
+// Las amenazas con imagen (o emoji) se ven chiquitas en vista global y van
+// creciendo a medida que el jugador se acerca con pinch zoom. Mapeamos la
+// altitude actual de la cámara a un factor de escala aplicado vía CSS var.
+function updateThreatMarkerScale() {
+  const pov = globe.pointOfView();
+  const alt = pov?.altitude ?? 2.5;
+  let scale;
+  if (alt > 2.5) scale = 0.55;
+  else if (alt > 1.0) scale = 0.55 + (1 - (alt - 1.0) / 1.5) * 0.35; // → 0.9
+  else if (alt > 0.4) scale = 0.9 + (1 - (alt - 0.4) / 0.6) * 0.4;   // → 1.3
+  else scale = 1.3 + (1 - alt / 0.4) * 0.4;                          // → 1.7
+  document.documentElement.style.setProperty(
+    "--threat-marker-scale",
+    scale.toFixed(2)
+  );
+}
+controls.addEventListener("change", updateThreatMarkerScale);
+updateThreatMarkerScale();
+
 // Resize: globe.gl no se ajusta solo cuando cambia el viewport.
 function fitGlobe() {
   globe.width(container.clientWidth);

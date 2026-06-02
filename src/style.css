@@ -122,14 +122,20 @@ html, body {
 /* ── Amenazas (HTML markers) ──────────────────────────────────────────── */
 .threat-marker {
   --threat-color: #00ffff;
+  /* --threat-marker-scale lo setea main.js según altitude de la cámara,
+   * para que las amenazas se vean chicas en vista global y crezcan a
+   * medida que el jugador se acerca con pinch zoom. */
   position: relative;
-  width: 56px;
-  height: 56px;
+  width: 64px;
+  height: 64px;
   display: flex;
   align-items: center;
   justify-content: center;
   pointer-events: auto;
   touch-action: none;
+  transform: scale(var(--threat-marker-scale, 1));
+  transform-origin: center;
+  transition: transform 0.2s ease-out;
 }
 
 .threat-marker .threat-halo {
@@ -150,6 +156,28 @@ html, body {
   font-size: 28px;
   z-index: 2;
   filter: drop-shadow(0 0 8px var(--threat-color));
+}
+
+/* Cuando se reemplazó el emoji por una imagen, el icono ocupa todo el
+ * marker para que la criatura/objeto se vea grande y reconocible. */
+.threat-marker .threat-icon.has-image {
+  position: absolute;
+  inset: 0;
+  font-size: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.threat-marker .threat-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  filter: drop-shadow(0 0 8px var(--threat-color))
+    drop-shadow(0 0 4px rgba(0, 0, 0, 0.6));
+  user-select: none;
+  -webkit-user-drag: none;
+  pointer-events: none;
 }
 
 .threat-marker .threat-label {
@@ -1310,8 +1338,8 @@ html, body {
   }
 
   .threat-marker {
-    width: 70px;
-    height: 70px;
+    width: 80px;
+    height: 80px;
   }
   .threat-marker .threat-icon {
     font-size: 34px;
