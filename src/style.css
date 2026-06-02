@@ -126,16 +126,16 @@ html, body {
    * para que las amenazas se vean chicas en vista global y crezcan a
    * medida que el jugador se acerca con pinch zoom. */
   position: relative;
-  width: 64px;
-  height: 64px;
+  width: 96px;
+  height: 96px;
   display: flex;
   align-items: center;
   justify-content: center;
   pointer-events: auto;
   touch-action: none;
   transform: scale(var(--threat-marker-scale, 1));
-  transform-origin: center;
-  transition: transform 0.2s ease-out;
+  transform-origin: bottom center;
+  transition: transform 0.25s ease-out;
 }
 
 .threat-marker .threat-halo {
@@ -1338,11 +1338,11 @@ html, body {
   }
 
   .threat-marker {
-    width: 80px;
-    height: 80px;
+    width: 120px;
+    height: 120px;
   }
   .threat-marker .threat-icon {
-    font-size: 34px;
+    font-size: 38px;
   }
   .threat-marker .threat-label {
     font-size: 12px;

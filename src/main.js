@@ -102,25 +102,55 @@ controls.dampingFactor = 0.08;
 controls.rotateSpeed = 0.6;
 controls.zoomSpeed = 0.9;
 
-// ── Sizing dinámico de las amenazas ─────────────────────────────────────────
-// Las amenazas con imagen (o emoji) se ven chiquitas en vista global y van
-// creciendo a medida que el jugador se acerca con pinch zoom. Mapeamos la
-// altitude actual de la cámara a un factor de escala aplicado vía CSS var.
+// ── Sizing y altura dinámicos de las amenazas ───────────────────────────────
+// Cuando el jugador está en vista global, los markers se ven chicos y altos
+// (encima de la columna 3D). Cuando se acerca, escalan más grandes y bajan
+// hasta casi tocar la superficie, así la amenaza se ve "en su contexto"
+// geográfico en lugar de flotando en el aire.
+let currentCamAlt = 2.5;
+let lastRefreshedAlt = -1;
+const ALT_REFRESH_DELTA = 0.06; // disparo refresh cada 6% de cambio
 function updateThreatMarkerScale() {
   const pov = globe.pointOfView();
   const alt = pov?.altitude ?? 2.5;
+  currentCamAlt = alt;
+
+  // Escala (más grande al acercarse).
   let scale;
-  if (alt > 2.5) scale = 0.55;
-  else if (alt > 1.0) scale = 0.55 + (1 - (alt - 1.0) / 1.5) * 0.35; // → 0.9
-  else if (alt > 0.4) scale = 0.9 + (1 - (alt - 0.4) / 0.6) * 0.4;   // → 1.3
-  else scale = 1.3 + (1 - alt / 0.4) * 0.4;                          // → 1.7
+  if (alt > 2.5) scale = 0.7;
+  else if (alt > 1.0) scale = 0.7 + (1 - (alt - 1.0) / 1.5) * 0.5;   // → 1.2
+  else if (alt > 0.4) scale = 1.2 + (1 - (alt - 0.4) / 0.6) * 0.6;   // → 1.8
+  else scale = 1.8 + (1 - alt / 0.4) * 0.6;                          // → 2.4
   document.documentElement.style.setProperty(
     "--threat-marker-scale",
     scale.toFixed(2)
   );
+
+  // Si la altitude cambió suficiente, re-aplicamos los htmlElements para
+  // que el accessor de altitude se vuelva a evaluar (los markers descienden
+  // hacia la superficie en zoom in).
+  if (Math.abs(alt - lastRefreshedAlt) > ALT_REFRESH_DELTA) {
+    lastRefreshedAlt = alt;
+    if (typeof refreshThreatLayers === "function") refreshThreatLayers();
+  }
 }
 controls.addEventListener("change", updateThreatMarkerScale);
 updateThreatMarkerScale();
+
+/**
+ * Mezcla la altitude "tope de columna" (cuando estamos lejos) con
+ * "casi en superficie" (cuando estamos zoom in), según `currentCamAlt`.
+ *   camAlt >= 2.0  → top of column (igual que antes)
+ *   camAlt <= 0.3  → casi pegado a la superficie
+ */
+function threatMarkerAltitude(topAlt) {
+  const surface = 0.005;
+  let mix;
+  if (currentCamAlt >= 2.0) mix = 0;
+  else if (currentCamAlt <= 0.3) mix = 1;
+  else mix = (2.0 - currentCamAlt) / 1.7;
+  return topAlt * (1 - mix) + surface * mix;
+}
 
 // Resize: globe.gl no se ajusta solo cuando cambia el viewport.
 function fitGlobe() {
@@ -420,10 +450,24 @@ function refreshAircraftLayer() {
     .ringsData(getAllRingsData());
 }
 function refreshThreatLayers() {
-  globe
-    .pointsData(threatRenderer.getPointsData())
-    .ringsData(getAllRingsData());
+  // Las columnas (pointsData) se reducen también al acercarse, así no quedan
+  // como un palo gigante al costado de la imagen cuando estás cerca.
+  const points = threatRenderer.getPointsData().map((p) => ({
+    ...p,
+    altitude: threatColumnAltitude(p.altitude),
+  }));
+  globe.pointsData(points).ringsData(getAllRingsData());
   globe.htmlElementsData(getAllHtmlElementsData());
+}
+
+function threatColumnAltitude(topAlt) {
+  // camAlt >= 2.0 → altura completa
+  // camAlt <= 0.3 → muy reducida (12% del tope)
+  let factor;
+  if (currentCamAlt >= 2.0) factor = 1.0;
+  else if (currentCamAlt <= 0.3) factor = 0.12;
+  else factor = 0.12 + ((currentCamAlt - 0.3) / 1.7) * 0.88;
+  return topAlt * factor;
 }
 
 // Rings combinados: amenazas (anillos lentos amplios) + aviones bajo ataque
@@ -491,6 +535,8 @@ function ringColorInterpolator(hex) {
 
 // Combinamos aviones + amenazas en una sola lista de htmlElements.
 // Usamos un campo `__kind` para dispatcher al element builder correcto.
+// Las amenazas usan altitude dinámica: alto en vista global, descienden
+// hasta cerca de la superficie cuando el jugador hace zoom in.
 function getAllHtmlElementsData() {
   const planes = aircraftMgr.getHtmlElementsData().map((d) => ({
     ...d,
@@ -498,6 +544,7 @@ function getAllHtmlElementsData() {
   }));
   const threats = threatRenderer.getHtmlElementsData().map((d) => ({
     ...d,
+    alt: threatMarkerAltitude(d.alt),
     __kind: "threat",
   }));
   return [...planes, ...threats];
