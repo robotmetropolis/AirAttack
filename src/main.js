@@ -131,10 +131,17 @@ function updateThreatMarkerScale() {
   // hacia la superficie en zoom in).
   if (Math.abs(alt - lastRefreshedAlt) > ALT_REFRESH_DELTA) {
     lastRefreshedAlt = alt;
-    if (typeof refreshThreatLayers === "function") refreshThreatLayers();
+    // refreshThreatLayers se declara más abajo: lo invocamos diferido para
+    // evitar TDZ en la primera llamada al inicializar.
+    queueMicrotask(() => {
+      if (threatLayersReady) refreshThreatLayers();
+    });
   }
 }
+let threatLayersReady = false;
 controls.addEventListener("change", updateThreatMarkerScale);
+// La primera llamada se hace después del bootstrap, no acá: la dispara el
+// flag threatLayersReady = true al final del módulo.
 updateThreatMarkerScale();
 
 /**
@@ -1049,6 +1056,12 @@ if (isTouchDevice) {
 flyToGlobe();
 activateAllThreats(null, { silent: true });
 restartPollLoop();
+
+// Ahora sí, las layers están armadas y se puede ajustar dinámicamente
+// la altura de los markers cuando el usuario haga zoom.
+threatLayersReady = true;
+// Ejecutamos una pasada inicial para colocar los markers en el preset actual.
+refreshThreatLayers();
 
 console.log("[paranormal-hunt] init OK", {
   preset: state.preset?.label,
