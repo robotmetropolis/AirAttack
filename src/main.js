@@ -10,12 +10,18 @@ import { flagFor } from "./flags.js";
 import { THREATS, THREAT_CATEGORIES } from "./threats.js";
 import { ThreatManager } from "./threatManager.js";
 import { ThreatRenderer, colorForThreat } from "./threatRender.js";
+import {
+  mountThreatImage,
+  preloadThreatImages,
+  setOnThreatImageReady,
+} from "./threatImage.js";
 import { Simulator } from "./simulator.js";
 import {
   playAttackSound,
   playRescueSound,
   playLostSound,
   playGameOverSound,
+  speakPilotAccept,
   setMuted,
   isMuted,
 } from "./audio.js";
@@ -102,6 +108,85 @@ controls.dampingFactor = 0.08;
 controls.rotateSpeed = 0.6;
 controls.zoomSpeed = 0.9;
 
+// Auto-rotate: pausa al volar hacia amenaza / seguir avión; vuelve tras 20s sin
+// mover la cámara (arrastre, zoom o toque en el globo).
+const IDLE_ROTATE_RESUME_MS = 20_000;
+const autoRotateIdle = {
+  paused: false,
+  prevAutoRotate: true,
+  lastActivity: Date.now(),
+  timer: null,
+};
+
+function markCameraActivity() {
+  autoRotateIdle.lastActivity = Date.now();
+  if (autoRotateIdle.paused) scheduleAutoRotateResume();
+}
+
+function scheduleAutoRotateResume() {
+  clearTimeout(autoRotateIdle.timer);
+  autoRotateIdle.timer = setTimeout(() => {
+    if (followState.active) {
+      scheduleAutoRotateResume();
+      return;
+    }
+    const idleFor = Date.now() - autoRotateIdle.lastActivity;
+    if (idleFor < IDLE_ROTATE_RESUME_MS - 80) {
+      scheduleAutoRotateResume();
+      return;
+    }
+    resumeAutoRotateAfterIdle();
+  }, IDLE_ROTATE_RESUME_MS);
+}
+
+function pauseAutoRotateForView() {
+  if (!autoRotateIdle.paused) {
+    autoRotateIdle.prevAutoRotate = controls.autoRotate;
+  }
+  autoRotateIdle.paused = true;
+  controls.autoRotate = false;
+  document.getElementById("btn-rotate")?.classList.remove("active-rotate");
+  markCameraActivity();
+}
+
+function resumeAutoRotateAfterIdle() {
+  const shouldRotate = autoRotateIdle.prevAutoRotate;
+  autoRotateIdle.paused = false;
+  clearTimeout(autoRotateIdle.timer);
+  autoRotateIdle.timer = null;
+  if (shouldRotate) {
+    controls.autoRotate = true;
+    document.getElementById("btn-rotate")?.classList.add("active-rotate");
+  }
+}
+
+function clearAutoRotatePause({ restoreNow = false } = {}) {
+  const was = autoRotateIdle.prevAutoRotate;
+  autoRotateIdle.paused = false;
+  clearTimeout(autoRotateIdle.timer);
+  autoRotateIdle.timer = null;
+  if (restoreNow && was) {
+    controls.autoRotate = true;
+    document.getElementById("btn-rotate")?.classList.add("active-rotate");
+  }
+}
+
+function onControlsStart() {
+  if (followState.active) followState.userPaused = true;
+  markCameraActivity();
+}
+controls.addEventListener("start", onControlsStart);
+controls.addEventListener("change", markCameraActivity);
+controls.addEventListener("end", markCameraActivity);
+container.addEventListener(
+  "wheel",
+  () => {
+    if (followState.active) followState.userPaused = true;
+    markCameraActivity();
+  },
+  { passive: true }
+);
+
 // ── Sizing y altura dinámicos de las amenazas ───────────────────────────────
 // Cuando el jugador está en vista global, los markers se ven chicos y altos
 // (encima de la columna 3D). Cuando se acerca, escalan más grandes y bajan
@@ -109,34 +194,80 @@ controls.zoomSpeed = 0.9;
 // geográfico en lugar de flotando en el aire.
 let currentCamAlt = 2.5;
 let lastRefreshedAlt = -1;
-const ALT_REFRESH_DELTA = 0.06; // disparo refresh cada 6% de cambio
+let pillarsWereVisible = true;
+let lastThreatCaptureSig = "";
+const ALT_REFRESH_DELTA = 0.06; // solo re-posiciona markers HTML, no el pilar
+// Por debajo de esto no dibujamos la columna 3D (el "pilar" octagonal).
+const COLUMN_HIDE_ALT = 0.88;
+
+function threatCaptureSignature() {
+  return [...threatCaptureCounts().entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([id, n]) => `${id}:${n}`)
+    .join("|");
+}
+
+function refreshThreatLayersIfNeeded({ force = false } = {}) {
+  const sig = threatCaptureSignature();
+  const pillarsVisible = currentCamAlt > COLUMN_HIDE_ALT;
+  const captureChanged = sig !== lastThreatCaptureSig;
+  const visibilityChanged = pillarsVisible !== pillarsWereVisible;
+  if (!force && !captureChanged && !visibilityChanged) return;
+  lastThreatCaptureSig = sig;
+  pillarsWereVisible = pillarsVisible;
+  refreshThreatLayers();
+}
+
 function updateThreatMarkerScale() {
   const pov = globe.pointOfView();
   const alt = pov?.altitude ?? 2.5;
   currentCamAlt = alt;
 
-  // Escala (mucho más grande al acercarse para que la amenaza sea bien
-  // legible en zoom in). Curva: 0.7 (lejos) → 4.0 (muy cerca).
+  // Escala: más grande en general; al acercarse domina la imagen (sin pilar).
   let scale;
-  if (alt > 2.5) scale = 0.7;
-  else if (alt > 1.0) scale = 0.7 + (1 - (alt - 1.0) / 1.5) * 0.7;   // → 1.4
-  else if (alt > 0.4) scale = 1.4 + (1 - (alt - 0.4) / 0.6) * 1.0;   // → 2.4
-  else if (alt > 0.15) scale = 2.4 + (1 - (alt - 0.15) / 0.25) * 1.1; // → 3.5
-  else scale = 3.5 + (1 - alt / 0.15) * 0.8;                          // → 4.3
+  if (alt > 2.5) scale = 0.9;
+  else if (alt > 1.0) scale = 0.9 + (1 - (alt - 1.0) / 1.5) * 0.85;   // → 1.75
+  else if (alt > 0.4) scale = 1.75 + (1 - (alt - 0.4) / 0.6) * 1.5;   // → 3.25
+  else if (alt > 0.15) scale = 3.25 + (1 - (alt - 0.15) / 0.25) * 2.2; // → 5.45
+  else scale = 5.45 + (1 - alt / 0.15) * 3.5;                           // → 8.95
   document.documentElement.style.setProperty(
     "--threat-marker-scale",
     scale.toFixed(2)
   );
 
-  // Si la altitude cambió suficiente, re-aplicamos los htmlElements para
-  // que el accessor de altitude se vuelva a evaluar (los markers descienden
-  // hacia la superficie en zoom in).
+  // Glow: siempre leve. En zoom cercano un mínimo para separar del mapa.
+  const HALO_MIN = 0.2;
+  const HALO_MAX = 0.5;
+  let haloStrength;
+  if (alt <= COLUMN_HIDE_ALT) haloStrength = HALO_MIN;
+  else if (alt >= 1.8) haloStrength = HALO_MAX;
+  else {
+    const t = (alt - COLUMN_HIDE_ALT) / (1.8 - COLUMN_HIDE_ALT);
+    haloStrength = HALO_MIN + t * (HALO_MAX - HALO_MIN);
+  }
+  document.documentElement.style.setProperty(
+    "--threat-halo-strength",
+    haloStrength.toFixed(2)
+  );
+  let planeScale = 1;
+  if (alt <= 0.12) planeScale = 2.8;
+  else if (alt <= 0.3) planeScale = 2.1;
+  else if (alt <= COLUMN_HIDE_ALT) planeScale = 1.6;
+  document.documentElement.style.setProperty(
+    "--plane-marker-scale",
+    planeScale.toFixed(2)
+  );
+  document.body.classList.toggle("threat-zoom-close", alt <= COLUMN_HIDE_ALT);
+
+  // Solo los markers HTML bajan con el zoom; el pilar mantiene altura fija.
   if (Math.abs(alt - lastRefreshedAlt) > ALT_REFRESH_DELTA) {
     lastRefreshedAlt = alt;
-    // refreshThreatLayers se declara más abajo: lo invocamos diferido para
-    // evitar TDZ en la primera llamada al inicializar.
+    const pillarsVisible = alt > COLUMN_HIDE_ALT;
+    const visibilityChanged = pillarsVisible !== pillarsWereVisible;
     queueMicrotask(() => {
-      if (threatLayersReady) refreshThreatLayers();
+      if (!threatLayersReady) return;
+      if (visibilityChanged) refreshThreatLayersIfNeeded({ force: true });
+      else globe.htmlElementsData(getAllHtmlElementsData());
     });
   }
 }
@@ -156,9 +287,38 @@ function threatMarkerAltitude(topAlt) {
   const surface = 0.005;
   let mix;
   if (currentCamAlt >= 2.0) mix = 0;
-  else if (currentCamAlt <= 0.3) mix = 1;
+  else if (currentCamAlt <= COLUMN_HIDE_ALT) mix = 1;
   else mix = (2.0 - currentCamAlt) / 1.7;
   return topAlt * (1 - mix) + surface * mix;
+}
+
+/** Separa el marcador del avión del icono de la amenaza cuando el tractor los junta. */
+function spreadPlaneBesideThreat(lat, lon, threatId, icao) {
+  const threat = THREATS[threatId];
+  const info = threatMgr.getAttackInfo(icao);
+  if (!threat || !info || (info.pullT || 0) < 0.04) return { lat, lon };
+
+  let dLat = lat - threat.lat;
+  let dLon = lon - threat.lon;
+  let dist = Math.hypot(dLat, dLon);
+  const minDeg = 0.14 + (info.pullT || 0) * 0.22;
+
+  if (dist >= minDeg) return { lat, lon };
+
+  const ac = info.ac;
+  dLat = (ac?.lat ?? lat) - threat.lat;
+  dLon = (ac?.lon ?? lon) - threat.lon;
+  dist = Math.hypot(dLat, dLon);
+  if (dist < 0.001) {
+    dLat = 0.16;
+    dLon = 0.1;
+    dist = Math.hypot(dLat, dLon);
+  }
+  const scale = minDeg / dist;
+  return {
+    lat: Math.max(-85, Math.min(85, threat.lat + dLat * scale)),
+    lon: threat.lon + dLon * scale,
+  };
 }
 
 // Resize: globe.gl no se ajusta solo cuando cambia el viewport.
@@ -179,7 +339,11 @@ const state = {
   lastAircraftList: [],
   mode: "SIM",
   lastAttackSoundAt: 0,
+  gameStarted: false,
 };
+
+let rescueTransmitTimer = null;
+let rescueTransmitAnim = null;
 
 // ── Managers ─────────────────────────────────────────────────────────────────
 const aircraftMgr = new AircraftManager();
@@ -223,7 +387,15 @@ const hud = {
   timerFill: document.getElementById("timer-fill"),
   timerText: document.getElementById("timer-text"),
   btnRescue: document.getElementById("btn-rescue"),
+  btnDetailFly: document.getElementById("btn-detail-fly"),
   rescueHint: document.getElementById("rescue-hint"),
+  rescueCoords: document.getElementById("rescue-coords"),
+  rescueCoordsText: document.getElementById("rescue-coords-text"),
+  rescueStatus: document.getElementById("rescue-status"),
+  sosPanel: document.getElementById("sos-panel"),
+  sosList: document.getElementById("sos-list"),
+  introOverlay: document.getElementById("intro-overlay"),
+  introStart: document.getElementById("intro-start"),
   threatDetail: document.getElementById("threat-detail"),
   threatDetailClose: document.getElementById("threat-detail-close"),
   tdIcon: document.getElementById("td-icon"),
@@ -243,6 +415,32 @@ const hud = {
 // ── Cámara: pointOfView helpers ──────────────────────────────────────────────
 function flyTo(lat, lng, altitude, ms = 1500) {
   globe.pointOfView({ lat, lng, altitude }, ms);
+}
+
+/**
+ * Corrige el encuadre según zoom y paneles HUD (offset chico al acercarse).
+ * panel: "right" = detalle avión a la derecha; "left" = detalle amenaza.
+ */
+function hudFrameOffsets(camAltitude, { panel = "right" } = {}) {
+  const mobile = window.matchMedia("(max-width: 900px)").matches;
+  const alt = camAltitude ?? currentCamAlt ?? 2.5;
+  let lat;
+  let lng;
+  if (alt <= 0.18) {
+    lat = mobile ? 0.045 : 0.07;
+    lng = mobile ? 0.035 : 0.055;
+  } else if (alt <= 0.4) {
+    lat = mobile ? 0.14 : 0.2;
+    lng = mobile ? 0.1 : 0.16;
+  } else if (alt <= 1.0) {
+    lat = mobile ? 0.5 : 0.75;
+    lng = mobile ? 0.38 : 0.58;
+  } else {
+    lat = mobile ? 1.6 : 2.6;
+    lng = mobile ? 1.1 : 1.8;
+  }
+  const lngSign = panel === "left" ? -1 : 1;
+  return { latOffset: lat, lngOffset: lngSign * lng };
 }
 
 function flyToGlobe() {
@@ -269,29 +467,80 @@ function flyToPreset(presetKey) {
   });
 }
 
-function flyToAircraft(icao) {
+/** Centro de cámara para ver un avión (posición visual si está bajo tractor). */
+function aircraftViewTarget(icao) {
   const ac = aircraftMgr.getById(icao);
-  if (!ac) return;
-  // Offset hacia el sur (latitud menor) para que el avión quede un poco
-  // arriba del centro, así no lo tapa el panel inferior. En mobile el
-  // panel ocupa más relativo a la pantalla, pero usar un offset chico
-  // (~3.5°) deja al avión visible y centrado horizontalmente.
-  const altitude = 0.18;
-  const isMobile = window.matchMedia("(max-width: 900px)").matches;
-  const latOffset = isMobile ? 3.5 : 5;
-  let centerLat = ac.lat - latOffset;
-  if (centerLat < -85) centerLat = -85;
-  if (centerLat > 85) centerLat = 85;
-  flyTo(centerLat, ac.lon, altitude, 1400);
+  if (!ac) return null;
+  const pos = threatMgr.getDisplayPosition(icao) || { lat: ac.lat, lon: ac.lon };
+  if (pos.lat == null || pos.lon == null) return null;
+  const info = threatMgr.getAttackInfo(icao);
+  const spread = info
+    ? spreadPlaneBesideThreat(pos.lat, pos.lon, info.threatId, icao)
+    : pos;
+  const altitude = 0.13;
+  const { latOffset, lngOffset } = hudFrameOffsets(altitude, { panel: "right" });
+  return {
+    lat: Math.max(-85, Math.min(85, spread.lat - latOffset)),
+    lng: spread.lon + lngOffset,
+    altitude,
+  };
 }
 
-function flyToThreat(threatId) {
+function flyToAircraft(icao, { animate = true } = {}) {
+  const target = aircraftViewTarget(icao);
+  if (!target) return;
+  pauseAutoRotateForView();
+  globe.pointOfView(target, animate ? 1400 : 0);
+}
+
+/** Mantiene el avión en cuadro (solo si el jugador no arrastró el mapa). */
+function updateFollowCamera() {
+  if (!followState.active || followState.userPaused || !followState.icao) return;
+  if (!threatMgr.isUnderAttack(followState.icao)) return;
+  const target = aircraftViewTarget(followState.icao);
+  if (!target) return;
+  globe.pointOfView(target, 0);
+}
+
+/** Centro de cámara para ver una amenaza (offset para no taparla con el panel). */
+function threatViewTarget(threatId) {
   const t = THREATS[threatId];
-  if (!t) return;
-  // Altura proporcional al radius; amenazas globales como Bermuda se ven mejor
-  // un poco más arriba para apreciar el radio entero.
-  const altitude = Math.max(0.18, t.radius_km / 5_000);
-  flyTo(t.lat, t.lon, altitude, 1500);
+  if (!t) return null;
+  const altitude = Math.max(0.12, Math.min(0.17, t.radius_km / 6_000));
+  const { latOffset, lngOffset } = hudFrameOffsets(altitude, {
+    panel: hud.threatDetail?.classList.contains("hidden") ? "right" : "left",
+  });
+
+  const captured = threatMgr
+    .attackedList()
+    .filter((i) => i.threatId === threatId)
+    .sort((a, b) => a.deadlineMs - b.deadlineMs);
+  if (captured.length) {
+    const ac = captured[0].ac;
+    const pos = threatMgr.getDisplayPosition(ac.icao) || { lat: ac.lat, lon: ac.lon };
+    const spread = spreadPlaneBesideThreat(pos.lat, pos.lon, threatId, ac.icao);
+    const focusLat = (t.lat + spread.lat) / 2;
+    const focusLng = (t.lon + spread.lon) / 2;
+    return {
+      lat: Math.max(-85, Math.min(85, focusLat - latOffset * 0.5)),
+      lng: focusLng + lngOffset * 0.5,
+      altitude: Math.min(altitude, 0.14),
+    };
+  }
+
+  return {
+    lat: Math.max(-85, Math.min(85, t.lat - latOffset)),
+    lng: t.lon + lngOffset,
+    altitude,
+  };
+}
+
+/** Vuela hacia la amenaza sin bloquear el mapa (no activa seguimiento de avión). */
+function flyToThreat(threatId) {
+  const target = threatViewTarget(threatId);
+  if (!target) return;
+  pauseAutoRotateForView();
+  flyTo(target.lat, target.lng, target.altitude, 1500);
 }
 
 // ── Tiempo UTC ───────────────────────────────────────────────────────────────
@@ -306,40 +555,48 @@ setInterval(() => {
 // para restaurarlo al rescatar / cerrar el panel.
 const followState = {
   active: false,
-  prevAutoRotate: false,
   icao: null,
+  userPaused: false,
 };
 
 function startFollow(ac) {
-  if (followState.active) return;
+  if (!ac) return;
   followState.active = true;
   followState.icao = ac.icao;
-  followState.prevAutoRotate = controls.autoRotate;
-  controls.autoRotate = false;
-  // Reflejar el cambio visual en el botón
-  btnRotate?.classList.toggle("active-rotate", false);
-  flyToAircraft(ac.icao);
+  followState.userPaused = false;
+  flyToAircraft(ac.icao, { animate: true });
 }
 
-function stopFollow({ flyBack = true } = {}) {
+function stopFollow({ flyBack = true, restoreRotate = true } = {}) {
   if (!followState.active) return;
-  const wasRotating = followState.prevAutoRotate;
   followState.active = false;
   followState.icao = null;
+  followState.userPaused = false;
   if (flyBack) flyToGlobe();
-  if (wasRotating) {
-    controls.autoRotate = true;
-    btnRotate?.classList.toggle("active-rotate", true);
-  }
+  if (restoreRotate) clearAutoRotatePause({ restoreNow: true });
+  else clearAutoRotatePause({ restoreNow: false });
 }
 
 function selectAircraft(icao) {
+  if (
+    state.selectedIcao &&
+    icao !== state.selectedIcao &&
+    threatMgr.getAttackInfo(state.selectedIcao)?.transmitting
+  ) {
+    const prev = threatMgr.getAttackInfo(state.selectedIcao);
+    if (prev) {
+      prev.transmitting = false;
+      prev.evasion = null;
+    }
+    clearRescueTransmitTimers();
+  }
   state.selectedIcao = icao;
   aircraftMgr.setSelected(icao);
   refreshAircraftLayer();
   if (!icao) {
     hud.detail.classList.add("hidden");
-    // Si veníamos siguiendo un avión, volvemos a la vista global.
+    clearRescueTransmitTimers();
+    refreshRescuePanel();
     if (followState.active) stopFollow({ flyBack: true });
     return;
   }
@@ -361,11 +618,14 @@ function selectAircraft(icao) {
   hud.detailOrig.textContent = ac.origin_country || "--";
 
   refreshAttackBanner();
+  refreshRescuePanel();
 
-  // Si está bajo ataque, centramos y paramos la rotación automáticamente.
-  // Reemplaza al viejo botón "CENTRAR" que se eliminó.
   if (threatMgr.isUnderAttack(icao)) {
     startFollow(ac);
+  } else {
+    if (followState.active) stopFollow({ flyBack: false, restoreRotate: false });
+    pauseAutoRotateForView();
+    flyToAircraft(icao, { animate: true });
   }
 }
 
@@ -379,14 +639,20 @@ function showThreatDetail(threatId) {
   const t = THREATS[threatId];
   if (!t) return;
   // Color dinámico del panel según el color dominante del emoji de la amenaza
-  const rgb = hexToRgb(colorForThreat(t));
+  const rgb = hexToRgb(colorForThreat(t, threatId));
   if (rgb) {
     hud.threatDetail.style.setProperty("--tr", rgb.r);
     hud.threatDetail.style.setProperty("--tg", rgb.g);
     hud.threatDetail.style.setProperty("--tb", rgb.b);
   }
   hud.threatDetail.classList.remove("hidden");
+  hud.tdFly.dataset.threatId = threatId;
   hud.tdIcon.textContent = t.icon;
+  hud.tdIcon.classList.remove("has-image");
+  mountThreatImage(threatId, hud.tdIcon, {
+    imgClass: "td-icon-img",
+    fallbackEmoji: t.icon,
+  }).catch(() => {});
   hud.tdName.textContent = t.name;
   hud.tdRegion.textContent = t.region || "";
   hud.tdDesc.textContent = t.desc || "";
@@ -397,7 +663,6 @@ function showThreatDetail(threatId) {
   hud.tdStatus.textContent = threatMgr.isActive(threatId) ? "ACTIVA" : "INACTIVA";
   hud.tdLat.textContent = t.lat.toFixed(3);
   hud.tdLon.textContent = t.lon.toFixed(3);
-  hud.tdFly.dataset.threatId = threatId;
 }
 
 hud.threatDetailClose.addEventListener("click", () => {
@@ -425,7 +690,6 @@ function refreshAttackBanner() {
   const info = threatMgr.getAttackInfo(icao);
   if (!info || info.rescued) {
     hud.attackBanner.classList.add("hidden");
-    hud.btnRescue.disabled = true;
     return;
   }
   const t = THREATS[info.threatId];
@@ -438,9 +702,125 @@ function refreshAttackBanner() {
   const pct = Math.max(0, Math.min(100, (remaining / total) * 100));
   hud.timerFill.style.width = `${pct}%`;
   hud.timerText.textContent = `${Math.ceil(remaining / 1000)}s`;
-  hud.btnRescue.disabled = false;
 }
 setInterval(refreshAttackBanner, 500);
+
+function clearRescueTransmitTimers() {
+  if (rescueTransmitTimer) clearTimeout(rescueTransmitTimer);
+  if (rescueTransmitAnim) clearInterval(rescueTransmitAnim);
+  rescueTransmitTimer = null;
+  rescueTransmitAnim = null;
+}
+
+function refreshRescuePanel() {
+  const icao = state.selectedIcao;
+  const info = icao ? threatMgr.getAttackInfo(icao) : null;
+  const underAttack = info && !info.rescued;
+
+  if (!underAttack) {
+    hud.btnDetailFly?.classList.add("hidden");
+    hud.rescueCoords.classList.add("hidden");
+    if (!info?.transmitting) {
+      hud.rescueStatus.classList.add("hidden");
+      hud.btnRescue.classList.remove("transmitting");
+      hud.btnRescue.disabled = true;
+      hud.btnRescue.textContent = "📡 ENVIAR RUTA DE EVASIÓN";
+    }
+    return;
+  }
+
+  hud.btnDetailFly?.classList.remove("hidden");
+
+  if (info.transmitting) {
+    hud.btnRescue.disabled = true;
+    hud.btnRescue.classList.add("transmitting");
+    hud.rescueCoords.classList.remove("hidden");
+    if (info.evasion) {
+      hud.rescueCoordsText.textContent = `${info.evasion.lat.toFixed(3)}°, ${info.evasion.lon.toFixed(3)}°`;
+    }
+    return;
+  }
+
+  hud.btnRescue.disabled = false;
+  hud.btnRescue.classList.remove("transmitting");
+  hud.btnRescue.textContent = "📡 ENVIAR RUTA DE EVASIÓN";
+  hud.rescueCoords.classList.add("hidden");
+  hud.rescueStatus.classList.add("hidden");
+  hud.rescueHint.textContent =
+    "Enviá coordenadas de evasión. El piloto debe confirmar para salir de la emergencia.";
+}
+
+async function runRescueTransmit(icao) {
+  const ev = threatMgr.startRescueTransmit(icao);
+  if (!ev) {
+    showToast("No se pudo transmitir (cooldown o no está bajo ataque)", "warn");
+    return;
+  }
+
+  clearRescueTransmitTimers();
+  hud.btnRescue.disabled = true;
+  hud.btnRescue.classList.add("transmitting");
+  hud.rescueCoords.classList.remove("hidden");
+  hud.rescueCoordsText.textContent = `${ev.lat.toFixed(3)}°, ${ev.lon.toFixed(3)}°`;
+  hud.rescueStatus.classList.remove("hidden");
+  hud.rescueStatus.textContent = "Transmitiendo vectores al piloto…";
+  refreshAircraftLayer();
+
+  rescueTransmitAnim = setInterval(() => {
+    threatMgr.tickRescueTransmit(icao);
+    refreshAircraftLayer();
+  }, 120);
+
+  rescueTransmitTimer = setTimeout(async () => {
+    clearRescueTransmitTimers();
+    hud.rescueStatus.textContent = "Piloto confirma. Ejecutando desvío…";
+    await speakPilotAccept(ev.callsign);
+    threatMgr.finishRescueTransmit(icao);
+    hud.rescueStatus.textContent = "¡Vuelo liberado!";
+    refreshRescuePanel();
+    refreshAttackBanner();
+    renderSosList();
+    refreshAircraftLayer();
+    setTimeout(() => {
+      if (hud.rescueStatus) hud.rescueStatus.classList.add("hidden");
+    }, 2500);
+  }, 3200);
+}
+
+/** B2: lista SOS ordenada por urgencia (menos tiempo primero). */
+function renderSosList() {
+  const list = threatMgr
+    .attackedList()
+    .sort((a, b) => a.deadlineMs - b.deadlineMs);
+
+  if (!list.length) {
+    hud.sosPanel.classList.add("hidden");
+    hud.sosList.innerHTML = "";
+    return;
+  }
+
+  hud.sosPanel.classList.remove("hidden");
+  hud.sosList.innerHTML = list
+    .map((info) => {
+      const ac = info.ac;
+      const t = THREATS[info.threatId];
+      const remaining = Math.max(0, Math.ceil((info.deadlineMs - Date.now()) / 1000));
+      const sel = state.selectedIcao === ac.icao ? " selected" : "";
+      const flag = flagFor(ac.origin_country) || "";
+      return `<div class="sos-row${sel}" data-icao="${ac.icao}">
+        <div>
+          <span class="sos-cs">${flag} ${ac.callsign || ac.icao}</span>
+          <span class="sos-threat">${t?.icon || ""} ${t?.name || info.threatId}</span>
+        </div>
+        <span class="sos-time">${remaining}s</span>
+      </div>`;
+    })
+    .join("");
+
+  hud.sosList.querySelectorAll(".sos-row").forEach((el) => {
+    el.addEventListener("click", () => selectAircraft(el.dataset.icao));
+  });
+}
 
 // ── Layers de globe.gl: aviones + amenazas ───────────────────────────────────
 // pointsData (columnas) + ringsData (pulsos) + htmlElementsData (emoji)
@@ -456,27 +836,22 @@ setInterval(refreshAttackBanner, 500);
 function refreshAircraftLayer() {
   globe
     .htmlElementsData(getAllHtmlElementsData())
-    .ringsData(getAllRingsData());
+    .ringsData(getAllRingsData())
+    .arcsData(getAttackArcsData());
 }
+function threatCaptureCounts() {
+  return threatMgr.getCaptureCountsByThreat();
+}
+
 function refreshThreatLayers() {
-  // Las columnas (pointsData) se reducen también al acercarse, así no quedan
-  // como un palo gigante al costado de la imagen cuando estás cerca.
-  const points = threatRenderer.getPointsData().map((p) => ({
-    ...p,
-    altitude: threatColumnAltitude(p.altitude),
-  }));
-  globe.pointsData(points).ringsData(getAllRingsData());
+  globe.pointsData(getThreatPointsForGlobe()).ringsData(getAllRingsData());
   globe.htmlElementsData(getAllHtmlElementsData());
 }
 
-function threatColumnAltitude(topAlt) {
-  // camAlt >= 2.0 → altura completa
-  // camAlt <= 0.3 → muy reducida (12% del tope)
-  let factor;
-  if (currentCamAlt >= 2.0) factor = 1.0;
-  else if (currentCamAlt <= 0.3) factor = 0.12;
-  else factor = 0.12 + ((currentCamAlt - 0.3) / 1.7) * 0.88;
-  return topAlt * factor;
+/** Columnas 3D: altura y grosor fijos; visibles solo con zoom lejano/medio. */
+function getThreatPointsForGlobe() {
+  if (currentCamAlt <= COLUMN_HIDE_ALT) return [];
+  return threatRenderer.getPointsData(threatCaptureCounts());
 }
 
 // Rings combinados: amenazas (anillos lentos amplios) + aviones bajo ataque
@@ -484,10 +859,47 @@ function threatColumnAltitude(topAlt) {
 // efímeros que celebran un rescate exitoso, estilo earth-shield).
 function getAllRingsData() {
   return [
-    ...threatRenderer.getRingsData(),
-    ...aircraftMgr.getAttackedRingsData(),
+    ...threatRenderer.getRingsData(threatCaptureCounts()),
+    ...aircraftMgr.getAttackedRingsData((icao) => threatMgr.getDisplayPosition(icao)),
     ...getRescueShieldsData(),
   ];
+}
+
+function distanceKmApprox(lat1, lon1, lat2, lon2) {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+/** Línea fina tractor beam (sin tubo 3D que parecía un "bean"). */
+function getAttackArcsData() {
+  const arcs = [];
+  for (const info of threatMgr.attackedList()) {
+    if ((info.pullT || 0) < 0.04) continue;
+    const t = THREATS[info.threatId];
+    const pos = threatMgr.getDisplayPosition(info.ac.icao);
+    if (!t || !pos) continue;
+    const dist = distanceKmApprox(pos.lat, pos.lon, t.lat, t.lon);
+    if (dist < 30) continue;
+    const rgb = hexToRgb(colorForThreat(t, info.threatId)) || { r: 255, g: 70, b: 90 };
+    arcs.push({
+      startLat: pos.lat,
+      startLng: pos.lon,
+      endLat: t.lat,
+      endLng: t.lon,
+      colors: [
+        "rgba(255, 45, 70, 0.35)",
+        `rgba(${rgb.r},${rgb.g},${rgb.b},0.55)`,
+      ],
+    });
+  }
+  return arcs;
 }
 
 // Escudos de rescate: cuando el jugador rescata un avión, aparece sobre su
@@ -537,9 +949,10 @@ function getRescueShieldsData() {
 
 // Interpolador de color: recibe un color hex y devuelve una función t→rgba
 // con alpha decreciente (sqrt(1-t)) para el efecto de "ripple" que se desvanece.
-function ringColorInterpolator(hex) {
+function ringColorInterpolator(hex, alphaScale = 1) {
   const rgb = hexToRgb(hex) || { r: 255, g: 255, b: 255 };
-  return (t) => `rgba(${rgb.r},${rgb.g},${rgb.b},${Math.sqrt(1 - t)})`;
+  return (t) =>
+    `rgba(${rgb.r},${rgb.g},${rgb.b},${Math.sqrt(1 - t) * alphaScale})`;
 }
 
 // Combinamos aviones + amenazas en una sola lista de htmlElements.
@@ -547,16 +960,33 @@ function ringColorInterpolator(hex) {
 // Las amenazas usan altitude dinámica: alto en vista global, descienden
 // hasta cerca de la superficie cuando el jugador hace zoom in.
 function getAllHtmlElementsData() {
-  const planes = aircraftMgr.getHtmlElementsData().map((d) => ({
-    ...d,
-    __kind: "plane",
-  }));
-  const threats = threatRenderer.getHtmlElementsData().map((d) => ({
-    ...d,
-    alt: threatMarkerAltitude(d.alt),
-    __kind: "threat",
-  }));
-  return [...planes, ...threats];
+  const threats = threatRenderer
+    .getHtmlElementsData(threatCaptureCounts())
+    .map((d) => ({
+      ...d,
+      alt: threatMarkerAltitude(d.alt),
+      __kind: "threat",
+    }));
+  const planes = aircraftMgr.getHtmlElementsData().map((d) => {
+    const info = threatMgr.getAttackInfo(d.icao);
+    const pos = threatMgr.getDisplayPosition(d.icao) || { lat: d.lat, lon: d.lng };
+    const spread = info
+      ? spreadPlaneBesideThreat(pos.lat, pos.lon, info.threatId, d.icao)
+      : pos;
+    let alt = d.alt;
+    if (info && !info.rescued) {
+      alt = Math.max(alt, threatMarkerAltitude(0.07) + 0.012);
+    }
+    return {
+      ...d,
+      lat: spread.lat,
+      lng: spread.lon,
+      alt,
+      __kind: "plane",
+    };
+  });
+  // Amenazas primero, aviones encima (si no, el icono tapa al avión capturado).
+  return [...threats, ...planes];
 }
 
 const planeBuilder = aircraftMgr.getElementBuilder();
@@ -569,7 +999,7 @@ globe
   .pointAltitude("altitude")
   .pointColor("color")
   .pointRadius((d) => d.radius || 0.4)
-  .pointResolution(8)
+  .pointResolution(12)
   .pointsData([])
 
   // Anillos pulsantes (amenazas, aviones bajo ataque y escudos de rescate)
@@ -579,8 +1009,32 @@ globe
   .ringMaxRadius("maxR")
   .ringPropagationSpeed("propagationSpeed")
   .ringRepeatPeriod("repeatPeriod")
-  .ringColor((d) => ringColorInterpolator(d.color))
+  .ringColor((d) =>
+    ringColorInterpolator(
+      d.color,
+      d.threatId != null
+        ? d.isCapturing
+          ? 0.58
+          : 0.42
+        : d.kind === "shield"
+          ? 0.7
+          : 0.85
+    )
+  )
   .ringsData([])
+
+  // Tractor beam: línea 1px punteada (arcStroke null = sin tubo volumétrico)
+  .arcStartLat("startLat")
+  .arcStartLng("startLng")
+  .arcEndLat("endLat")
+  .arcEndLng("endLng")
+  .arcColor((d) => d.colors)
+  .arcAltitude(0.012)
+  .arcStroke(null)
+  .arcDashLength(0.5)
+  .arcDashGap(0.35)
+  .arcDashAnimateTime(2200)
+  .arcsData([])
 
   // HTML markers (aviones + emoji de amenaza)
   .htmlLat("lat")
@@ -666,9 +1120,9 @@ function renderThreatsList() {
     html += grouped[cat]
       .map((t) => {
         const active = threatMgr.isActive(t.id) ? " active" : "";
-        const c = colorForThreat(t);
+        const c = colorForThreat(t, t.id);
         return `<div class="threat-row${active}" data-threat="${t.id}" style="--threat-row-color:${c}">
-          <span class="threat-icon-small">${t.icon}</span>
+          <span class="threat-icon-small" data-threat-id="${t.id}">${t.icon}</span>
           <span class="threat-name">${t.name}</span>
           <span class="threat-power">★${t.power}</span>
         </div>`;
@@ -677,6 +1131,16 @@ function renderThreatsList() {
     html += "</div>";
   }
   hud.threatsList.innerHTML = html;
+  hud.threatsList.querySelectorAll(".threat-icon-small[data-threat-id]").forEach(
+    (el) => {
+      const id = el.dataset.threatId;
+      const threat = THREATS[id];
+      mountThreatImage(id, el, {
+        imgClass: "threat-row-img",
+        fallbackEmoji: threat?.icon,
+      }).catch(() => {});
+    }
+  );
   hud.threatsList.querySelectorAll(".threat-row").forEach((el) => {
     el.addEventListener("click", () => {
       const id = el.dataset.threat;
@@ -688,7 +1152,7 @@ function renderThreatsList() {
         threatRenderer.showThreat(id);
       }
       el.classList.toggle("active");
-      refreshThreatLayers();
+      refreshThreatLayersIfNeeded({ force: true });
     });
   });
 }
@@ -715,6 +1179,8 @@ threatMgr.callbacks.onState = (s) => {
   // En mobile el botón hamburguesa titila rojo cuando hay ataques activos
   // para llamar la atención del jugador hacia el listado de aviones.
   document.getElementById("btn-menu")?.classList.toggle("alert", s.attackedCount > 0);
+  renderSosList();
+  refreshThreatLayersIfNeeded();
 };
 
 threatMgr.callbacks.onEvent = (ev) => {
@@ -726,6 +1192,10 @@ threatMgr.callbacks.onEvent = (ev) => {
       state.lastAttackSoundAt = now;
     }
     showToast(ev.msg, "warn");
+    renderSosList();
+    if (isMobileLayout()) {
+      document.querySelector('.hud-tabs .tab[data-tab="traffic"]')?.click();
+    }
   } else if (ev.type === "RESCUE_OK") {
     playRescueSound();
     showToast(ev.msg, "ok");
@@ -743,6 +1213,7 @@ threatMgr.callbacks.onEvent = (ev) => {
   } else if (ev.type === "LOST") {
     playLostSound();
     showToast(ev.msg, "danger");
+    renderSosList();
   } else if (ev.type === "GAME_OVER") {
     playGameOverSound();
     showToast(ev.msg, "danger");
@@ -773,6 +1244,7 @@ function appendComms(ev) {
 
 // ── Game loop ────────────────────────────────────────────────────────────────
 async function pollOnce() {
+  if (!state.gameStarted) return;
   let aircraft;
   if (state.mode === "SIM") {
     aircraft = simulator.getAircraft();
@@ -796,7 +1268,10 @@ async function pollOnce() {
   aircraftMgr.setAttackedIcaos(threatMgr.attackedList().map((i) => i.ac.icao));
   hud.aviones.textContent = aircraftMgr.count();
   renderAircraftList(aircraft);
+  renderSosList();
   refreshAircraftLayer();
+  refreshThreatLayersIfNeeded();
+  updateFollowCamera();
 }
 
 
@@ -810,16 +1285,27 @@ function restartPollLoop() {
 
 // Tick más rápido para timers de rescate (no necesita poll de aviones)
 setInterval(() => {
+  if (!state.gameStarted) return;
   threatMgr.tick();
   aircraftMgr.setAttackedIcaos(threatMgr.attackedList().map((i) => i.ac.icao));
   refreshAttackBanner();
+  renderSosList();
   refreshAircraftLayer();
+  refreshThreatLayersIfNeeded();
+  updateFollowCamera();
 }, 1000);
 
 // ── Botones de acción ────────────────────────────────────────────────────────
+hud.btnDetailFly?.addEventListener("click", () => {
+  const ac = state.selectedIcao ? aircraftMgr.getById(state.selectedIcao) : null;
+  if (ac && threatMgr.isUnderAttack(ac.icao)) startFollow(ac);
+});
+
 hud.btnRescue.addEventListener("click", () => {
   if (!state.selectedIcao) return;
-  threatMgr.manualRescue(state.selectedIcao);
+  const info = threatMgr.getAttackInfo(state.selectedIcao);
+  if (!info || info.rescued || info.transmitting) return;
+  runRescueTransmit(state.selectedIcao);
 });
 
 // ── Activación masiva de amenazas ────────────────────────────────────────────
@@ -833,7 +1319,7 @@ function activateAllThreats(filter = null, { silent = true } = {}) {
       count++;
     }
   }
-  refreshThreatLayers();
+  refreshThreatLayersIfNeeded({ force: true });
   renderThreatsList();
   return count;
 }
@@ -846,7 +1332,7 @@ function deactivateAllThreats() {
       count++;
     }
   }
-  refreshThreatLayers();
+  refreshThreatLayersIfNeeded({ force: true });
   renderThreatsList();
   return count;
 }
@@ -877,8 +1363,16 @@ const btnRotate = document.getElementById("btn-rotate");
 // Estado inicial: prendido (boot ya seteó controls.autoRotate = true)
 btnRotate.classList.add("active-rotate");
 btnRotate.addEventListener("click", () => {
+  markCameraActivity();
   controls.autoRotate = !controls.autoRotate;
   btnRotate.classList.toggle("active-rotate", controls.autoRotate);
+  if (controls.autoRotate) {
+    clearAutoRotatePause({ restoreNow: false });
+    autoRotateIdle.prevAutoRotate = true;
+  } else {
+    clearAutoRotatePause({ restoreNow: false });
+    autoRotateIdle.prevAutoRotate = false;
+  }
 });
 
 // ── Mobile: hamburger menu / sidebar toggle ─────────────────────────────────
@@ -923,147 +1417,181 @@ sidebarEl.addEventListener("click", (ev) => {
   }
 });
 
-// ── Mobile: hit-test manual de markers ───────────────────────────────────────
-// En dispositivos touch los markers tienen `pointer-events: none` (CSS) para
-// que los gestos rotate/pinch sobre el globo funcionen aunque el dedo aterrice
-// sobre un avión o amenaza. Detectamos el "tap" (touch corto y sin movimiento)
-// y hacemos hit-test contra los bounding rects de los markers, despachando un
-// click sintético al marker tappeado.
-//
-// Detección robusta de touch: matchMedia (pointer: coarse) falla en algunos
-// browsers híbridos. Combinamos varios checks. Si hay touch, marcamos el body
-// con .is-touch y el CSS desactiva pointer-events de los markers.
+// ── Passthrough de pointer: rotate / zoom / pan siempre al canvas ───────────
+// globe.gl superpone una capa HTML (CSS2D) a pantalla completa. Si esa capa
+// o los markers capturan eventos, OrbitControls no recibe wheel ni drag — ni
+// siquiera en "huecos" entre aviones. Forzamos pointer-events:none en overlays
+// y resolvemos taps/clicks con hit-test manual (mouse + touch unificado).
+
 const isTouchDevice =
   "ontouchstart" in window ||
   (navigator.maxTouchPoints && navigator.maxTouchPoints > 0) ||
   window.matchMedia("(pointer: coarse)").matches;
+if (isTouchDevice) document.body.classList.add("is-touch");
 
-if (isTouchDevice) {
-  document.body.classList.add("is-touch");
+function configureGlobePointerPassthrough() {
+  const canvas = container.querySelector("canvas");
+  if (canvas) canvas.style.pointerEvents = "auto";
+  for (const child of container.children) {
+    if (child.tagName === "DIV") child.style.pointerEvents = "none";
+  }
+  container.querySelectorAll(".plane-marker, .threat-marker").forEach((el) => {
+    el.style.pointerEvents = "none";
+  });
+}
 
-  // En mobile globe.gl mete los HTML markers dentro de un wrapper (CSS2DRenderer
-  // de Three.js). Por defecto ese wrapper captura touch events y bloquea los
-  // gestos de OrbitControls. Lo identificamos buscando el div hijo de
-  // #globeContainer que contiene los markers, y le apagamos pointer-events.
-  // No tocamos OTROS divs (que pueden ser wrappers que contienen el canvas
-  // de Three.js, los cuales SÍ necesitan recibir touch para rotate/zoom).
-  function disableMarkerWrappersPE() {
-    const candidates = container.querySelectorAll("div");
-    for (const div of candidates) {
-      // Solo divs que contienen markers (CSS2DRenderer dom).
-      if (
-        div.children.length > 0 &&
-        (div.firstElementChild?.classList?.contains("plane-marker") ||
-          div.firstElementChild?.classList?.contains("threat-marker") ||
-          div.querySelector?.(":scope > .plane-marker, :scope > .threat-marker"))
-      ) {
-        if (div.style.pointerEvents !== "none") {
-          div.style.pointerEvents = "none";
-        }
-      }
+configureGlobePointerPassthrough();
+setTimeout(configureGlobePointerPassthrough, 100);
+setTimeout(configureGlobePointerPassthrough, 500);
+let globePePending = false;
+function scheduleGlobePointerPassthrough() {
+  if (globePePending) return;
+  globePePending = true;
+  requestAnimationFrame(() => {
+    globePePending = false;
+    configureGlobePointerPassthrough();
+  });
+}
+const globePeObserver = new MutationObserver(scheduleGlobePointerPassthrough);
+globePeObserver.observe(container, { childList: true, subtree: true });
+
+const TAP_MAX_DURATION_MS = 350;
+const TAP_MAX_MOVE_PX = 14;
+let tapPointerId = null;
+let tapStartX = 0;
+let tapStartY = 0;
+let tapStartT = 0;
+let tapMoved = false;
+
+function markerHitAt(clientX, clientY, selector, pad = 0) {
+  const markers = container.querySelectorAll(selector);
+  for (let i = markers.length - 1; i >= 0; i--) {
+    const r = markers[i].getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) continue;
+    if (
+      clientX >= r.left - pad &&
+      clientX <= r.right + pad &&
+      clientY >= r.top - pad &&
+      clientY <= r.bottom + pad
+    ) {
+      return markers[i];
     }
   }
-  // Ejecutar después del primer render y luego periódicamente por si el
-  // wrapper se recrea (raro, pero por las dudas).
-  setTimeout(disableMarkerWrappersPE, 200);
-  setTimeout(disableMarkerWrappersPE, 800);
-  setInterval(disableMarkerWrappersPE, 3000);
+  return null;
 }
 
-if (isTouchDevice) {
-  let tapStartX = 0;
-  let tapStartY = 0;
-  let tapStartT = 0;
-  let tapTouchId = null;
-  let tapMoved = false;
-  const TAP_MAX_DURATION_MS = 350;
-  const TAP_MAX_MOVE_PX = 12;
-
-  container.addEventListener(
-    "touchstart",
-    (e) => {
-      if (e.touches.length !== 1) {
-        // multi-touch (pinch zoom): cancelamos cualquier tap pendiente
-        tapTouchId = null;
-        return;
-      }
-      const t = e.touches[0];
-      tapTouchId = t.identifier;
-      tapStartX = t.clientX;
-      tapStartY = t.clientY;
-      tapStartT = Date.now();
-      tapMoved = false;
-    },
-    { passive: true }
-  );
-
-  container.addEventListener(
-    "touchmove",
-    (e) => {
-      if (tapTouchId == null) return;
-      const t = Array.from(e.touches).find((x) => x.identifier === tapTouchId);
-      if (!t) return;
-      const dx = t.clientX - tapStartX;
-      const dy = t.clientY - tapStartY;
-      if (Math.hypot(dx, dy) > TAP_MAX_MOVE_PX) tapMoved = true;
-    },
-    { passive: true }
-  );
-
-  container.addEventListener(
-    "touchend",
-    (e) => {
-      if (tapTouchId == null) return;
-      const t = Array.from(e.changedTouches).find(
-        (x) => x.identifier === tapTouchId
-      );
-      tapTouchId = null;
-      if (!t || tapMoved) return;
-      if (Date.now() - tapStartT > TAP_MAX_DURATION_MS) return;
-
-      const x = t.clientX;
-      const y = t.clientY;
-      // Hit-test manual contra todos los markers visibles. Recorremos en
-      // orden inverso para preferir el último renderizado (encima visualmente).
-      const markers = document.querySelectorAll(
-        ".threat-marker, .plane-marker"
-      );
-      let hit = null;
-      for (let i = markers.length - 1; i >= 0; i--) {
-        const r = markers[i].getBoundingClientRect();
-        if (r.width === 0 || r.height === 0) continue;
-        if (x >= r.left && x <= r.right && y >= r.top && y <= r.bottom) {
-          hit = markers[i];
-          break;
-        }
-      }
-      if (hit) {
-        // Despachamos un click "real" para que reuse los listeners ya
-        // adjuntados por aircraft.js / threatRender.js.
-        hit.dispatchEvent(
-          new MouseEvent("click", {
-            bubbles: true,
-            cancelable: true,
-            clientX: x,
-            clientY: y,
-          })
-        );
-      }
-    },
-    { passive: true }
+function dispatchMarkerTapAt(clientX, clientY) {
+  const pad = isTouchDevice ? 14 : 8;
+  const plane = markerHitAt(clientX, clientY, ".plane-marker", pad);
+  const threat =
+    plane || markerHitAt(clientX, clientY, ".threat-marker", 0);
+  if (!threat) return;
+  threat.dispatchEvent(
+    new MouseEvent("click", {
+      bubbles: true,
+      cancelable: true,
+      clientX,
+      clientY,
+    })
   );
 }
+
+function resetTapState() {
+  tapPointerId = null;
+  tapMoved = false;
+}
+
+container.addEventListener(
+  "pointerdown",
+  (e) => {
+    if (e.button !== 0) return;
+    markCameraActivity();
+    tapPointerId = e.pointerId;
+    tapStartX = e.clientX;
+    tapStartY = e.clientY;
+    tapStartT = Date.now();
+    tapMoved = false;
+  },
+  { passive: true }
+);
+
+container.addEventListener(
+  "pointermove",
+  (e) => {
+    if (e.pointerId !== tapPointerId) return;
+    if (
+      Math.hypot(e.clientX - tapStartX, e.clientY - tapStartY) > TAP_MAX_MOVE_PX
+    ) {
+      tapMoved = true;
+      if (followState.active) followState.userPaused = true;
+    }
+  },
+  { passive: true }
+);
+
+container.addEventListener(
+  "pointerup",
+  (e) => {
+    if (e.pointerId !== tapPointerId) return;
+    const wasTap =
+      !tapMoved && Date.now() - tapStartT <= TAP_MAX_DURATION_MS;
+    resetTapState();
+    if (!wasTap) return;
+    dispatchMarkerTapAt(e.clientX, e.clientY);
+  },
+  { passive: true }
+);
+
+container.addEventListener("pointercancel", resetTapState);
+
+// ── Tutorial / inicio de misión ──────────────────────────────────────────────
+function startGame() {
+  if (state.gameStarted) return;
+  state.gameStarted = true;
+  hud.introOverlay?.classList.add("hidden");
+  activateAllThreats(null, { silent: true });
+  hud.aviones.textContent = "0";
+  restartPollLoop();
+  showToast("Misión iniciada. Salvá a las aeronaves bajo ataque.", "ok");
+  appendComms({
+    type: "MISSION",
+    msg: "🎮 MISIÓN INICIADA — Rescatá aviones antes de que las amenazas los capturen.",
+    t: new Date(),
+  });
+}
+
+hud.introStart?.addEventListener("click", () => {
+  const ctx = window.AudioContext || window.webkitAudioContext;
+  if (ctx) new ctx().resume?.();
+  if (window.speechSynthesis) window.speechSynthesis.getVoices();
+  startGame();
+});
 
 // ── Boot ─────────────────────────────────────────────────────────────────────
 flyToGlobe();
-activateAllThreats(null, { silent: true });
-restartPollLoop();
-
-// Ahora sí, las layers están armadas y se puede ajustar dinámicamente
-// la altura de los markers cuando el usuario haga zoom.
 threatLayersReady = true;
-// Ejecutamos una pasada inicial para colocar los markers en el preset actual.
 refreshThreatLayers();
+
+setOnThreatImageReady(() => {
+  if (threatLayersReady) refreshThreatLayersIfNeeded({ force: true });
+  renderThreatsList();
+});
+
+preloadThreatImages([
+  "area_51",
+  "roswell",
+  "uritorco",
+  "nazca",
+  "stonehenge",
+  "nessie",
+  "chupacabra",
+  "kraken",
+  "yeti",
+  "bigfoot",
+  "mothman",
+  "godzilla",
+  "cthulhu",
+]);
 
 console.log("[paranormal-hunt] init OK", {
   preset: state.preset?.label,

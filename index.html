@@ -14,6 +14,25 @@
     <link rel="stylesheet" href="/src/style.css" />
   </head>
   <body>
+    <!-- Tutorial inicial -->
+    <div class="intro-overlay" id="intro-overlay">
+      <div class="intro-card">
+        <h1>PARANORMAL HUNT</h1>
+        <p class="intro-lead">
+          Las amenazas paranormales capturan aviones en vuelo. Vos sos el único
+          que puede salvarlos.
+        </p>
+        <ol class="intro-steps">
+          <li>Activá amenazas en el panel <strong>AMENAZAS</strong> (o usá las que ya están activas).</li>
+          <li>Cuando un avión entre en zona de peligro, aparecerá en <strong>SOS</strong> y se arrastrará hacia la amenaza.</li>
+          <li><strong>Tocá el avión</strong> en el globo o en la lista SOS.</li>
+          <li>Enviá una <strong>ruta de evasión</strong>; el piloto debe confirmar para liberar el vuelo.</li>
+          <li>Rescatá antes de que venza el tiempo o perdés una vida.</li>
+        </ol>
+        <button type="button" class="intro-start" id="intro-start">COMENZAR MISIÓN</button>
+      </div>
+    </div>
+
     <!-- Globo 3D (globe.gl + three.js) -->
     <div id="globeContainer"></div>
 
@@ -48,6 +67,10 @@
       </div>
 
       <div class="tab-content active" data-tab="traffic">
+        <div class="sos-panel hidden" id="sos-panel">
+          <div class="sos-header">🆘 SOS — BAJO ATAQUE</div>
+          <div class="sos-list" id="sos-list"></div>
+        </div>
         <div class="aircraft-list" id="aircraft-list">
           <div class="empty">Cargando…</div>
         </div>
@@ -108,12 +131,18 @@
 
       <!-- Acciones de rescate -->
       <div class="rescue-panel">
+        <button type="button" class="btn-rescue hidden" id="btn-detail-fly">🎯 VOLAR HACIA</button>
         <button class="btn-rescue green" id="btn-rescue" disabled>
-          🛟 RESCATAR
+          📡 ENVIAR RUTA DE EVASIÓN
         </button>
+        <div class="rescue-coords hidden" id="rescue-coords">
+          <label>NUEVA RUTA PROPUESTA</label>
+          <span id="rescue-coords-text">--</span>
+        </div>
         <p class="rescue-hint" id="rescue-hint">
-          Tocá RESCATAR para liberar al avión bajo ataque.
+          Tocá un avión bajo ataque en el globo o en la lista SOS, luego enviá la ruta de evasión.
         </p>
+        <p class="rescue-status hidden" id="rescue-status"></p>
       </div>
     </section>
 

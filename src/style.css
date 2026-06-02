@@ -57,11 +57,20 @@ html, body {
   height: 100%;
   background: radial-gradient(ellipse at center, #050818 0%, #000000 100%);
   overflow: hidden;
+  /* Gestos van al canvas / OrbitControls, no al browser scroll. */
+  touch-action: none;
 }
 
-/* globe.gl genera un canvas adentro, asegurar que fitee */
+/* Capa CSS2D de markers: no debe interceptar rotate/zoom/wheel.
+ * Solo el canvas recibe pointer events; los taps en markers se resuelven
+ * por hit-test en main.js. */
+#globeContainer > div {
+  pointer-events: none !important;
+}
+
 #globeContainer canvas {
   display: block;
+  pointer-events: auto !important;
 }
 
 /* ── Aviones (HTML markers) ───────────────────────────────────────────── */
@@ -73,9 +82,8 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: center;
-  pointer-events: auto;
+  pointer-events: none;
   transition: transform 0.15s ease-out;
-  touch-action: none;
 }
 
 .plane-marker .plane-img {
@@ -100,6 +108,11 @@ html, body {
   opacity: 0.9;
 }
 
+.plane-marker.attacked {
+  transform: scale(var(--plane-marker-scale, 1.45));
+  z-index: 120;
+}
+
 .plane-marker.attacked .plane-img {
   filter: drop-shadow(0 0 6px #ff2244) drop-shadow(0 0 10px #ff2244);
   animation: ac-attack-pulse 0.7s ease-in-out infinite;
@@ -120,46 +133,85 @@ html, body {
 }
 
 /* ── Amenazas (HTML markers) ──────────────────────────────────────────── */
+/* Amenaza con avión capturado: icono más grande y tinte rojo de alerta. */
+.threat-marker.capturing {
+  transform: scale(
+    calc(var(--threat-marker-scale, 1) * var(--threat-capture-scale, 1.22))
+  );
+}
+
+.threat-marker.capturing .threat-img {
+  filter: drop-shadow(0 0 6px #ff2244) drop-shadow(0 0 12px rgba(255, 34, 68, 0.45))
+    drop-shadow(0 2px 4px rgba(0, 0, 0, 0.8));
+}
+
+.threat-marker.capturing .threat-halo {
+  background: radial-gradient(
+    circle,
+    #ff2244 0%,
+    transparent 50%
+  );
+  opacity: calc(0.12 * var(--threat-halo-strength, 0.35));
+}
+
 .threat-marker {
   --threat-color: #00ffff;
   /* --threat-marker-scale lo setea main.js según altitude de la cámara,
    * para que las amenazas se vean chicas en vista global y crezcan a
-   * medida que el jugador se acerca con pinch zoom. */
+   * medida que el jugador se acerca con pinch zoom.
+   * --threat-size-mult lo setea threatRender.js per-amenaza, en función
+   * de su radio de acción (radius_km). Bermuda/Cthulhu son grandes,
+   * Skinwalker/Nessie son chicos. */
   position: relative;
-  width: 128px;
-  height: 128px;
+  width: calc(168px * var(--threat-size-mult, 1));
+  height: calc(168px * var(--threat-size-mult, 1));
   display: flex;
   align-items: center;
   justify-content: center;
-  pointer-events: auto;
-  touch-action: none;
+  pointer-events: none;
   transform: scale(var(--threat-marker-scale, 1));
   transform-origin: bottom center;
   transition: transform 0.25s ease-out;
 }
 
+/* Halo muy suave: solo separa la figura del mapa sin lavarla.
+ * --threat-halo-strength: 0.2 (zoom in) → 0.5 (vista global). */
 .threat-marker .threat-halo {
   position: absolute;
-  inset: 0;
+  inset: 24%;
   border-radius: 50%;
   background: radial-gradient(
     circle,
-    var(--threat-color) 0%,
-    transparent 65%
+    color-mix(in srgb, var(--threat-color) 55%, transparent) 0%,
+    transparent 48%
   );
-  opacity: 0.45;
-  animation: threat-halo-pulse 2.2s ease-in-out infinite;
+  opacity: calc(0.1 * var(--threat-halo-strength, 0.35));
+  animation: threat-halo-pulse 3s ease-in-out infinite;
+}
+
+body.threat-zoom-close .threat-marker .threat-halo {
+  inset: 30%;
+  opacity: calc(0.07 * var(--threat-halo-strength, 0.2));
+  animation: none;
+}
+
+body.threat-zoom-close .threat-marker .threat-icon {
+  filter: none;
+}
+
+body.threat-zoom-close .threat-marker .threat-img {
+  filter: drop-shadow(0 3px 8px rgba(0, 0, 0, 0.85))
+    drop-shadow(0 0 2px color-mix(in srgb, var(--threat-color) 30%, transparent));
 }
 
 .threat-marker .threat-icon {
   position: relative;
   font-size: 28px;
   z-index: 2;
-  filter: drop-shadow(0 0 8px var(--threat-color));
+  filter: drop-shadow(0 0 2px var(--threat-color));
 }
 
-/* Cuando se reemplazó el emoji por una imagen, el icono ocupa todo el
- * marker para que la criatura/objeto se vea grande y reconocible. */
+/* Imagen wireframe: sin glow en el contenedor, ocupa todo el marker. */
 .threat-marker .threat-icon.has-image {
   position: absolute;
   inset: 0;
@@ -167,17 +219,23 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: center;
+  filter: none;
 }
 
 .threat-marker .threat-img {
   width: 100%;
   height: 100%;
   object-fit: contain;
-  filter: drop-shadow(0 0 8px var(--threat-color))
-    drop-shadow(0 0 4px rgba(0, 0, 0, 0.6));
+  filter: drop-shadow(0 2px 5px rgba(0, 0, 0, 0.8))
+    drop-shadow(0 0 1px color-mix(in srgb, var(--threat-color) 25%, transparent));
   user-select: none;
   -webkit-user-drag: none;
   pointer-events: none;
+}
+
+/* La tarjeta wireframe ya trae nombre; ocultamos etiqueta duplicada. */
+.threat-marker:has(.threat-icon.has-image) .threat-label {
+  display: none;
 }
 
 .threat-marker .threat-label {
@@ -195,8 +253,14 @@ html, body {
 }
 
 @keyframes threat-halo-pulse {
-  0%, 100% { transform: scale(1); opacity: 0.45; }
-  50% { transform: scale(1.35); opacity: 0.15; }
+  0%, 100% {
+    transform: scale(1);
+    opacity: calc(0.1 * var(--threat-halo-strength, 0.35));
+  }
+  50% {
+    transform: scale(1.06);
+    opacity: calc(0.05 * var(--threat-halo-strength, 0.35));
+  }
 }
 
 /* HUD compartido
@@ -606,6 +670,29 @@ html, body {
 .threat-icon {
   font-size: 22px;
   flex-shrink: 0;
+}
+
+.threat-icon-small {
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  line-height: 1;
+}
+
+.threat-icon-small.has-image {
+  font-size: 0;
+}
+
+.threat-icon-small .threat-row-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  filter: drop-shadow(0 0 3px var(--threat-row-color, #888));
+  pointer-events: none;
 }
 
 .threat-info { flex: 1; }
@@ -1032,6 +1119,29 @@ html, body {
   font-size: 56px;
   line-height: 1;
   filter: drop-shadow(0 0 8px rgba(var(--tr), var(--tg), var(--tb), 0.8));
+  width: 64px;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.threat-detail-icon.has-image {
+  /* Tarjetas wireframe (formato apaisado). */
+  font-size: 0;
+  filter: none;
+  width: 140px;
+  height: 84px;
+}
+
+.threat-detail-icon .td-icon-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  filter: drop-shadow(0 0 4px rgba(var(--tr), var(--tg), var(--tb), 0.7));
+  user-select: none;
+  -webkit-user-drag: none;
 }
 
 .threat-detail h3 {
@@ -1303,6 +1413,8 @@ html, body {
   }
   .threat-detail-icon {
     font-size: 42px;
+    width: 52px;
+    height: 52px;
   }
   .threat-detail-grid {
     grid-template-columns: 1fr 1fr;
@@ -1338,8 +1450,8 @@ html, body {
   }
 
   .threat-marker {
-    width: 160px;
-    height: 160px;
+    width: calc(200px * var(--threat-size-mult, 1));
+    height: calc(200px * var(--threat-size-mult, 1));
   }
   .threat-marker .threat-icon {
     font-size: 38px;
@@ -1383,27 +1495,6 @@ html, body {
   }
 }
 
-/* En dispositivos touch (mobile / tablet) los HTML markers de globe.gl
- * dejan pasar TODOS los gestos (rotate / pinch / pan) al canvas que está
- * abajo. Los taps se detectan en main.js mediante hit-test manual. Sin
- * esto, si el dedo aterrizaba sobre un avión o amenaza, el gesto era
- * absorbido por el marker y el globo no rotaba ni hacía zoom.
- *
- * Usamos clase `.is-touch` en body (seteada desde JS detectando touch
- * con ontouchstart / maxTouchPoints) en vez de @media (pointer: coarse)
- * que en algunos browsers híbridos no matchea bien. */
-body.is-touch .plane-marker,
-body.is-touch .threat-marker {
-  pointer-events: none !important;
-}
-
-@media (pointer: coarse) {
-  .plane-marker,
-  .threat-marker {
-    pointer-events: none;
-  }
-}
-
 /* En orientación landscape baja (móvil acostado): el bottom-sheet
    no debe taparlo todo, lo subimos a la mitad de la pantalla */
 @media (max-height: 500px) and (max-width: 900px) {
@@ -1416,4 +1507,209 @@ body.is-touch .threat-marker {
     left: auto;
     right: 6px;
   }
+}
+
+/* ── Tutorial inicial ───────────────────────────────────────────────────── */
+.intro-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 5000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(0, 4, 12, 0.92);
+  backdrop-filter: blur(8px);
+}
+
+.intro-overlay.hidden {
+  display: none;
+}
+
+.intro-card {
+  max-width: 480px;
+  padding: 28px 26px;
+  border: 1px solid rgba(0, 255, 200, 0.35);
+  border-radius: 12px;
+  background: linear-gradient(160deg, rgba(8, 24, 40, 0.98), rgba(4, 10, 20, 0.98));
+  box-shadow: 0 0 40px rgba(0, 255, 180, 0.12);
+}
+
+.intro-card h1 {
+  margin: 0 0 12px;
+  font-size: 22px;
+  letter-spacing: 3px;
+  color: #00ffc8;
+}
+
+.intro-lead {
+  margin: 0 0 16px;
+  line-height: 1.5;
+  color: #b8e8dc;
+  font-size: 14px;
+}
+
+.intro-steps {
+  margin: 0 0 22px;
+  padding-left: 20px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: #9ecfc0;
+}
+
+.intro-steps li {
+  margin-bottom: 8px;
+}
+
+.intro-start {
+  width: 100%;
+  padding: 14px;
+  border: 1px solid #00ffc8;
+  border-radius: 8px;
+  background: rgba(0, 255, 200, 0.12);
+  color: #00ffc8;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 2px;
+  cursor: pointer;
+}
+
+.intro-start:hover {
+  background: rgba(0, 255, 200, 0.22);
+}
+
+/* ── Lista SOS (B2) ─────────────────────────────────────────────────────── */
+.sos-panel {
+  border-bottom: 1px solid rgba(255, 60, 80, 0.35);
+  background: rgba(40, 0, 8, 0.35);
+  max-height: 42%;
+  overflow-y: auto;
+  flex-shrink: 0;
+}
+
+.sos-panel.hidden {
+  display: none;
+}
+
+.sos-header {
+  padding: 8px 12px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  color: #ff5577;
+  animation: sos-header-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes sos-header-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.65; }
+}
+
+.sos-list {
+  padding: 0 6px 8px;
+}
+
+.sos-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  margin-bottom: 4px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 60, 80, 0.25);
+  background: rgba(255, 30, 50, 0.08);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.sos-row:hover {
+  background: rgba(255, 60, 80, 0.18);
+}
+
+.sos-row.selected {
+  border-color: #ff4060;
+  background: rgba(255, 50, 70, 0.22);
+}
+
+.sos-row .sos-time {
+  margin-left: auto;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 12px;
+  font-weight: 700;
+  color: #ff8899;
+}
+
+.sos-row .sos-threat {
+  font-size: 10px;
+  color: #cc8899;
+  display: block;
+}
+
+.sos-row .sos-cs {
+  font-weight: 700;
+  font-size: 13px;
+  color: #ffe0e5;
+}
+
+.tab-content[data-tab="traffic"] {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+
+.tab-content[data-tab="traffic"] .aircraft-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* ── Rescate por coordenadas ────────────────────────────────────────────── */
+.rescue-coords {
+  margin: 10px 0 6px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(0, 255, 180, 0.25);
+  background: rgba(0, 40, 30, 0.4);
+}
+
+.rescue-coords label {
+  display: block;
+  font-size: 10px;
+  letter-spacing: 1px;
+  color: #6a9a88;
+  margin-bottom: 4px;
+}
+
+.rescue-coords span {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 14px;
+  color: #00ffc8;
+}
+
+.rescue-coords.hidden,
+.rescue-status.hidden {
+  display: none;
+}
+
+.rescue-status {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: #88ddbb;
+  font-style: italic;
+}
+
+.btn-rescue.transmitting {
+  opacity: 0.65;
+  animation: rescue-tx-pulse 1s ease-in-out infinite;
+}
+
+@keyframes rescue-tx-pulse {
+  0%, 100% { box-shadow: 0 0 0 rgba(0, 255, 150, 0); }
+  50% { box-shadow: 0 0 12px rgba(0, 255, 150, 0.35); }
+}
+
+.plane-marker.attacked.selected {
+  transform: scale(calc(var(--plane-marker-scale, 1.45) * 1.12));
+  z-index: 130;
 }

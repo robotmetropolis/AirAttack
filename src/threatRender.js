@@ -11,7 +11,7 @@
 // de Three.js, usando solo las primitivas que globe.gl ya optimiza.
 
 import { THREATS } from "./threats.js";
-import { loadThreatImage } from "./threatImage.js";
+import { mountThreatImage, getThreatImageColor } from "./threatImage.js";
 
 const COLOR_BY_CATEGORY = {
   ufo: "#00ffff",
@@ -93,16 +93,49 @@ export function dominantColorFromEmoji(emoji, fallback = "#888888") {
 }
 
 /**
- * Color a usar para una amenaza: dominante del emoji, con fallback a
- * `t.color` del catálogo y luego al color genérico de la categoría.
+ * Color unificado para pilar, anillos, halo e icono.
+ * Prioridad: imagen wireframe → color del catálogo → emoji → categoría.
  */
-export function colorForThreat(t) {
+export function colorForThreat(t, threatId = null) {
   if (!t) return "#888888";
-  const dom = dominantColorFromEmoji(
+  const id = threatId != null ? String(threatId) : null;
+  const fromImage = id ? getThreatImageColor(id) : null;
+  if (fromImage) return fromImage;
+  if (t.color) return t.color;
+  return dominantColorFromEmoji(
     t.icon,
-    t.color || COLOR_BY_CATEGORY[t.category] || "#888888",
+    COLOR_BY_CATEGORY[t.category] || "#888888",
   );
-  return dom;
+}
+
+const CAPTURE_RED = "#ff2244";
+
+function parseHex(hex) {
+  const m = String(hex).match(/^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i);
+  if (!m) return null;
+  return {
+    r: parseInt(m[1], 16),
+    g: parseInt(m[2], 16),
+    b: parseInt(m[3], 16),
+  };
+}
+
+function blendHex(hexA, hexB, t) {
+  const a = parseHex(hexA);
+  const b = parseHex(hexB);
+  if (!a || !b) return hexB;
+  const mix = (x, y) => Math.round(x * (1 - t) + y * t);
+  const r = mix(a.r, b.r);
+  const g = mix(a.g, b.g);
+  const bl = mix(a.b, b.b);
+  return `#${[r, g, bl].map((v) => v.toString(16).padStart(2, "0")).join("")}`;
+}
+
+/** Radio del pilar en grados, acorde al radio de acción de la amenaza. */
+function pillarRadiusForThreat(t, captureBoost = 1) {
+  const radiusKm = t.radius_km || 200;
+  const base = 0.2 + Math.sqrt(radiusKm / 250) * 0.32;
+  return base * captureBoost;
 }
 
 /**
@@ -145,21 +178,30 @@ export class ThreatRenderer {
   }
 
   // ─── Capa 1: columna vertical (pointsData) ────────────────────────────
-  getPointsData() {
+  getPointsData(captureCounts = null) {
+    const captures =
+      captureCounts instanceof Map ? captureCounts : new Map();
     const out = [];
     for (const id of this.activeIds) {
       const t = THREATS[id];
       if (!t) continue;
-      const color = colorForThreat(t);
-      // Altura del cilindro: proporcional al power (1..5) → 0.05..0.25
+      const n = captures.get(id) || 0;
+      const isCapturing = n > 0;
+      const threatColor = colorForThreat(t, id);
+      const color = isCapturing
+        ? blendHex(threatColor, CAPTURE_RED, 0.62)
+        : threatColor;
+      const captureScale = isCapturing ? 1 + Math.min(n, 3) * 0.12 : 1;
+      // Altura fija por poder (no sube/baja al capturar ni con el zoom).
       const altitude = 0.04 + (t.power || 3) * 0.04;
       out.push({
         threatId: id,
         lat: t.lat,
         lng: t.lon,
         altitude,
-        radius: 0.4, // radio del cilindro en grados (visual)
+        radius: pillarRadiusForThreat(t, isCapturing ? 1.4 * captureScale : 1),
         color,
+        isCapturing,
         label: t.name,
       });
     }
@@ -167,34 +209,49 @@ export class ThreatRenderer {
   }
 
   // ─── Capa 2: anillos pulsantes (ringsData) ────────────────────────────
-  getRingsData() {
+  getRingsData(captureCounts = null) {
+    const captures =
+      captureCounts instanceof Map ? captureCounts : new Map();
     const out = [];
     for (const id of this.activeIds) {
       const t = THREATS[id];
       if (!t) continue;
-      const color = colorForThreat(t);
+      const n = captures.get(id) || 0;
+      const isCapturing = n > 0;
+      const threatColor = colorForThreat(t, id);
+      const color = isCapturing
+        ? blendHex(threatColor, CAPTURE_RED, 0.5)
+        : threatColor;
       out.push({
         threatId: id,
         lat: t.lat,
         lng: t.lon,
-        // maxR en grados (1° ≈ 111 km). Lo ajustamos al radio de la amenaza.
-        maxR: Math.min(t.radius_km / 111, 12),
-        propagationSpeed: Math.max(0.5, (t.power || 3) * 0.3),
-        repeatPeriod: 1500,
+        maxR: Math.min(t.radius_km / 111, 12) * (isCapturing ? 1.08 : 1),
+        propagationSpeed: isCapturing
+          ? Math.max(1.2, (t.power || 3) * 0.45)
+          : Math.max(0.5, (t.power || 3) * 0.3),
+        repeatPeriod: isCapturing ? 900 : 1500,
         color,
+        isCapturing,
       });
     }
     return out;
   }
 
   // ─── Capa 3: HTML elements (emoji + nombre) ───────────────────────────
-  getHtmlElementsData() {
+  getHtmlElementsData(captureCounts = null) {
+    const captures =
+      captureCounts instanceof Map ? captureCounts : new Map();
     const out = [];
     for (const id of this.activeIds) {
       const t = THREATS[id];
       if (!t) continue;
-      const color = colorForThreat(t);
-      // Lo ponemos a una altura mayor que la columna para que flote arriba.
+      const n = captures.get(id) || 0;
+      const isCapturing = n > 0;
+      const threatColor = colorForThreat(t, id);
+      const color = isCapturing
+        ? blendHex(threatColor, CAPTURE_RED, 0.35)
+        : threatColor;
       const altitude = 0.04 + (t.power || 3) * 0.04 + 0.03;
       out.push({
         threatId: id,
@@ -203,6 +260,8 @@ export class ThreatRenderer {
         alt: altitude,
         threat: t,
         color,
+        isCapturing,
+        captureCount: n,
       });
     }
     return out;
@@ -214,7 +273,7 @@ export class ThreatRenderer {
       if (!div) {
         div = document.createElement("div");
         div.className = "threat-marker";
-        div.style.pointerEvents = "auto";
+        div.style.pointerEvents = "none";
         div.style.cursor = "pointer";
 
         const halo = document.createElement("div");
@@ -236,33 +295,42 @@ export class ThreatRenderer {
           this.onClick?.(d.threatId);
         });
 
-        // Intentar reemplazar el emoji por una imagen real si existe en
-        // public/threats/<id>.png|jpg|webp. El fondo negro se hace
-        // transparente automáticamente. Si no hay archivo, queda el emoji.
-        loadThreatImage(d.threatId)
-          .then((dataUrl) => {
-            if (!dataUrl) return;
-            const img = document.createElement("img");
-            img.src = dataUrl;
-            img.alt = "";
-            img.draggable = false;
-            img.className = "threat-img";
-            icon.textContent = "";
-            icon.appendChild(img);
-            icon.classList.add("has-image");
-          })
-          .catch(() => {
-            /* fallback al emoji, ya está */
-          });
-
         this._domCache.set(d.threatId, div);
       }
       const t = d.threat;
       div.style.setProperty("--threat-color", d.color);
+      // Multiplicador de tamaño según el radio de acción de la amenaza.
+      // Sirve para que un Bermuda/Cthulhu (radio 800-1000 km) se vea bien
+      // grande, y un Skinwalker/Nessie (radio 60-90 km) se vea chico.
+      // Curva sqrt para que la diferencia no sea excesiva.
+      const radius = t.radius_km || 200;
+      const sizeMult = Math.max(0.55, Math.min(2.4, Math.sqrt(radius / 250)));
+      div.style.setProperty("--threat-size-mult", sizeMult.toFixed(2));
+      const captureN = d.captureCount || 0;
+      const isCapturing = !!d.isCapturing;
+      div.classList.toggle("capturing", isCapturing);
+      div.style.setProperty(
+        "--threat-capture-scale",
+        isCapturing ? (1.22 + Math.min(captureN, 3) * 0.08).toFixed(2) : "1"
+      );
+      if (isCapturing) {
+        div.style.setProperty("--threat-color", d.color);
+      }
       const iconEl = div.querySelector('[data-role="icon"]');
-      // Solo seteamos el emoji mientras no hayamos cargado la imagen.
-      if (!iconEl.classList.contains("has-image")) {
+      if (
+        !iconEl.classList.contains("has-image") &&
+        iconEl.dataset.imageLoading !== "1"
+      ) {
         iconEl.textContent = t.icon || "?";
+        iconEl.dataset.imageLoading = "1";
+        mountThreatImage(d.threatId, iconEl, {
+          imgClass: "threat-img",
+          fallbackEmoji: t.icon || "?",
+        })
+          .catch(() => {})
+          .finally(() => {
+            delete iconEl.dataset.imageLoading;
+          });
       }
       div.querySelector('[data-role="label"]').textContent = t.name || "";
       div.dataset.category = t.category;

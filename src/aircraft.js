@@ -122,16 +122,17 @@ export class AircraftManager {
    * `globe.ringsData(...)` combinado con los rings de las amenazas.
    * Cada ring se propaga rápido y rojo para sensación de alerta.
    */
-  getAttackedRingsData() {
+  getAttackedRingsData(positionFor = null) {
     const out = [];
     for (const icao of this.attacked) {
       const ac = this.aircraft.get(icao);
       if (!ac || ac.lat == null || ac.lon == null) continue;
+      const pos = positionFor?.(icao) || { lat: ac.lat, lon: ac.lon };
       out.push({
         kind: "attack",
         icao,
-        lat: ac.lat,
-        lng: ac.lon,
+        lat: pos.lat,
+        lng: pos.lon,
         maxR: 3,
         propagationSpeed: 4,
         repeatPeriod: 700,
@@ -172,7 +173,7 @@ export class AircraftManager {
       if (!entry) {
         const div = document.createElement("div");
         div.className = "plane-marker";
-        div.style.pointerEvents = "auto";
+        div.style.pointerEvents = "none";
         div.style.cursor = "pointer";
 
         const img = document.createElement("img");

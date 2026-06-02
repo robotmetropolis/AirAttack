@@ -155,6 +155,53 @@ export function playLostSound() {
 /**
  * Game over: bajo cinematográfico cayendo lentamente.
  */
+let voiceBusy = false;
+
+/**
+ * Voz sintética (Web Speech API) para confirmación del piloto al rescatar.
+ */
+export function speakPilotLine(text, { rate = 0.92, pitch = 0.85 } = {}) {
+  if (muted || !text) return Promise.resolve();
+  if (typeof window === "undefined" || !window.speechSynthesis) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => {
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = "en-US";
+    u.rate = rate;
+    u.pitch = pitch;
+    u.volume = 0.85;
+    const voices = window.speechSynthesis.getVoices();
+    const en =
+      voices.find((v) => /en(-|_)(US|GB)/i.test(v.lang) && /male/i.test(v.name)) ||
+      voices.find((v) => v.lang.startsWith("en"));
+    if (en) u.voice = en;
+    voiceBusy = true;
+    u.onend = () => {
+      voiceBusy = false;
+      resolve();
+    };
+    u.onerror = () => {
+      voiceBusy = false;
+      resolve();
+    };
+    window.speechSynthesis.speak(u);
+  });
+}
+
+export function speakPilotAccept(callsign) {
+  const cs = (callsign || "aircraft").replace(/[^a-zA-Z0-9 ]/g, "").trim();
+  return speakPilotLine(`${cs}. Roger. Executing evasion turn now.`, {
+    rate: 1,
+    pitch: 0.95,
+  });
+}
+
+export function isVoiceBusy() {
+  return voiceBusy;
+}
+
 export function playGameOverSound() {
   if (muted) return;
   const ctx = getCtx();

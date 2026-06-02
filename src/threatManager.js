@@ -30,6 +30,35 @@ function distanceKm(lat1, lon1, lat2, lon2) {
   return 2 * R * Math.asin(Math.sqrt(a));
 }
 
+function clampLat(lat) {
+  return Math.max(-85, Math.min(85, lat));
+}
+
+function wrapLon(lon) {
+  return ((((lon + 180) % 360) + 360) % 360) - 180;
+}
+
+/** Coordenadas de evasión: alejando el avión de la amenaza (~120 km). */
+export function computeEvasionCoords(ac, threat) {
+  let dLat = ac.lat - threat.lat;
+  let dLon = ac.lon - threat.lon;
+  const len = Math.hypot(dLat, dLon);
+  if (len < 0.02) {
+    dLat = 1;
+    dLon = 0;
+  } else {
+    dLat /= len;
+    dLon /= len;
+  }
+  const km = 120;
+  const latDeg = km / 111;
+  const lonDeg = km / (111 * Math.cos((ac.lat * Math.PI) / 180) || 0.2);
+  return {
+    lat: clampLat(ac.lat + dLat * latDeg),
+    lon: wrapLon(ac.lon + dLon * lonDeg),
+  };
+}
+
 export class ThreatManager {
   constructor(viewer) {
     this.viewer = viewer;
@@ -120,6 +149,9 @@ export class ThreatManager {
             threatId: closestThreat.id,
             startedAt: now,
             deadlineMs: now + RESCUE_TIMEOUT_S * 1000,
+            pullT: 0,
+            transmitting: false,
+            evasion: null,
           });
           const t = closestThreat.threat;
           this._emitEvent(
@@ -135,6 +167,8 @@ export class ThreatManager {
     // 2) Aviones que ya no están en la lista poll → quedan en attacked (no las quitamos
     //    para mantener el timer, asumimos que siguen volando)
 
+    this._updateTractorPull();
+
     // 3) Procesar timeouts (perdidos) y rescates manuales
     this._tickRescues();
 
@@ -146,8 +180,55 @@ export class ThreatManager {
    * de la cámara para rescates pasivos.
    */
   tick() {
+    this._updateTractorPull();
     this._tickRescues();
     this._notifyState();
+  }
+
+  /** A2: el avión bajo ataque se arrastra lentamente hacia la amenaza. */
+  _updateTractorPull() {
+    const now = Date.now();
+    for (const info of this.attacked.values()) {
+      if (info.rescued) continue;
+      const elapsed = now - info.startedAt;
+      const total = Math.max(1, info.deadlineMs - info.startedAt);
+      const progress = Math.min(1, elapsed / total);
+      info.pullT = Math.min(0.38, progress * 0.45);
+    }
+  }
+
+  /**
+   * Posición visual en el globo (tractor beam). Si está transmitiendo evasión,
+   * mezcla hacia las coordenadas de escape.
+   */
+  getDisplayPosition(icao) {
+    const info = this.attacked.get(icao);
+    if (!info || info.rescued) return null;
+    const ac = info.ac;
+    if (ac.lat == null || ac.lon == null) return null;
+
+    if (info.transmitting && info.evasion) {
+      const t = Math.min(1, info.evasionBlend ?? 0);
+      const threat = THREATS[info.threatId];
+      const pulled = threat
+        ? {
+            lat: ac.lat + (threat.lat - ac.lat) * (info.pullT || 0),
+            lon: ac.lon + (threat.lon - ac.lon) * (info.pullT || 0),
+          }
+        : { lat: ac.lat, lon: ac.lon };
+      return {
+        lat: pulled.lat + (info.evasion.lat - pulled.lat) * t,
+        lon: pulled.lon + (info.evasion.lon - pulled.lon) * t,
+      };
+    }
+
+    const threat = THREATS[info.threatId];
+    if (!threat) return { lat: ac.lat, lon: ac.lon };
+    const t = info.pullT || 0;
+    return {
+      lat: ac.lat + (threat.lat - ac.lat) * t,
+      lon: ac.lon + (threat.lon - ac.lon) * t,
+    };
   }
 
   _tickRescues() {
@@ -182,19 +263,47 @@ export class ThreatManager {
   }
 
   /**
-   * Rescate manual (botón en HUD). Sólo funciona si el avión está bajo
-   * ataque y no hay cooldown. La cámara debe estar a < 100 km (no tan
-   * estricto como rescate pasivo).
+   * Paso 1 del rescate: enviar coordenadas de evasión al piloto.
+   * Devuelve { lat, lon } o null si no aplica.
    */
-  manualRescue(icao) {
+  startRescueTransmit(icao) {
     const now = Date.now();
-    if (now - this._lastRescueAt < RESCUE_COOLDOWN_S * 1000) return false;
+    if (now - this._lastRescueAt < RESCUE_COOLDOWN_S * 1000) return null;
     const info = this.attacked.get(icao);
-    if (!info || info.rescued) return false;
-    // Globe-edition: rescate sin condición de distancia (todo es vista global).
-    // El cooldown corto (2 s) evita spam de clicks.
-    this._lastRescueAt = now;
+    if (!info || info.rescued || info.transmitting) return null;
+    const threat = THREATS[info.threatId];
+    if (!threat) return null;
+    info.transmitting = true;
+    info.evasion = computeEvasionCoords(info.ac, threat);
+    info.evasionBlend = 0;
+    info.transmitStartedAt = now;
+    return { ...info.evasion, callsign: info.ac.callsign || icao };
+  }
+
+  /** Avanza la mezcla visual hacia la ruta de evasión mientras transmite. */
+  tickRescueTransmit(icao) {
+    const info = this.attacked.get(icao);
+    if (!info?.transmitting) return 1;
+    const elapsed = Date.now() - (info.transmitStartedAt || Date.now());
+    info.evasionBlend = Math.min(1, elapsed / 2800);
+    return info.evasionBlend;
+  }
+
+  /** Paso 2: el piloto acepta y se completa el rescate. */
+  finishRescueTransmit(icao) {
+    const info = this.attacked.get(icao);
+    if (!info || info.rescued || !info.transmitting) return false;
+    info.transmitting = false;
+    this._lastRescueAt = Date.now();
     this._completeRescue(icao, "MANUAL");
+    return true;
+  }
+
+  /** @deprecated usar startRescueTransmit + finishRescueTransmit */
+  manualRescue(icao) {
+    const ev = this.startRescueTransmit(icao);
+    if (!ev) return false;
+    this.finishRescueTransmit(icao);
     return true;
   }
 
@@ -228,6 +337,15 @@ export class ThreatManager {
 
   attackedList() {
     return [...this.attacked.values()].filter((i) => !i.rescued);
+  }
+
+  /** Amenazas con al menos un avión capturado ahora (threatId → cantidad). */
+  getCaptureCountsByThreat() {
+    const counts = new Map();
+    for (const info of this.attackedList()) {
+      counts.set(info.threatId, (counts.get(info.threatId) || 0) + 1);
+    }
+    return counts;
   }
 
   // ─── Helpers ────────────────────────────────────────────────────────────

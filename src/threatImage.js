@@ -10,6 +10,18 @@
 // Si no existe el archivo, devolvemos null y el caller usa el emoji.
 
 const cache = new Map(); // id -> Promise<dataURL | null>
+const colorFromImageCache = new Map(); // id_lower -> #hex
+let onImageReady = null;
+
+/** Cuando una imagen termina de cargar (y su color), refrescar capas del globo. */
+export function setOnThreatImageReady(fn) {
+  onImageReady = fn;
+}
+
+export function getThreatImageColor(threatId) {
+  if (!threatId) return null;
+  return colorFromImageCache.get(String(threatId).toLowerCase()) ?? null;
+}
 
 const BASE_URL = (import.meta.env.BASE_URL || "/") + "threats/";
 
@@ -18,7 +30,7 @@ const FORMATS = ["png", "jpg", "jpeg", "webp"];
 // Tamaño máximo del lado largo. Mantiene RAM bajo control y acelera el
 // procesamiento; 320 alcanza para que se vean nítidas con escala 1.7x en
 // pantalla (~80 * 1.7 ≈ 136px efectivos).
-const MAX_SIDE_PX = 320;
+const MAX_SIDE_PX = 512;
 
 // Distancia (en RGB euclídeo, 0..441) por debajo de la cual un pixel se
 // considera fondo. FULL_DIST = totalmente transparente; PARTIAL_DIST = fade
@@ -40,12 +52,44 @@ export async function loadThreatImage(threatId) {
   return promise;
 }
 
+/**
+ * Inserta la imagen procesada en un contenedor (globo, tarjeta, sidebar).
+ * Devuelve true si cargó imagen; si no, deja el emoji de fallback.
+ */
+export async function mountThreatImage(
+  threatId,
+  container,
+  { imgClass = "threat-img", fallbackEmoji = "?" } = {}
+) {
+  if (!container || !threatId) return false;
+  const dataUrl = await loadThreatImage(threatId);
+  if (!dataUrl) {
+    if (fallbackEmoji != null) container.textContent = fallbackEmoji;
+    container.classList.remove("has-image");
+    return false;
+  }
+  container.textContent = "";
+  container.classList.add("has-image");
+  const img = document.createElement("img");
+  img.src = dataUrl;
+  img.alt = "";
+  img.draggable = false;
+  img.className = imgClass;
+  container.appendChild(img);
+  return true;
+}
+
+/** Precarga imágenes de un listado de ids (sidebar / boot). */
+export function preloadThreatImages(threatIds) {
+  for (const id of threatIds) loadThreatImage(id);
+}
+
 async function tryLoadFormats(idLower) {
   for (const fmt of FORMATS) {
     const url = `${BASE_URL}${idLower}.${fmt}`;
     try {
       const img = await loadImage(url);
-      return processImage(img);
+      return processImage(img, idLower);
     } catch {
       // Probar siguiente extensión
     }
@@ -68,7 +112,44 @@ function loadImage(url) {
  * perímetro, hacemos transparente lo cercano a ese color con fade gradual,
  * y devolvemos un dataURL PNG.
  */
-function processImage(img) {
+function quantize(v) {
+  return (v >> 4) << 4;
+}
+
+/** Color dominante del wireframe (pixeles opacos y saturados). */
+function dominantColorFromImageData(data, w, h) {
+  const buckets = new Map();
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    const a = data[i + 3];
+    if (a < 90) continue;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    if (max < 45) continue;
+    if (max - min < 28) continue;
+    const key = `${quantize(r)},${quantize(g)},${quantize(b)}`;
+    buckets.set(key, (buckets.get(key) || 0) + 1);
+  }
+  let topKey = null;
+  let topCount = 0;
+  for (const [key, count] of buckets.entries()) {
+    if (count > topCount) {
+      topCount = count;
+      topKey = key;
+    }
+  }
+  if (!topKey) return null;
+  const [r, g, b] = topKey.split(",").map(Number);
+  const boost = (v) => Math.min(255, Math.round(v * 1.08 + 6));
+  return (
+    "#" +
+    [boost(r), boost(g), boost(b)].map((v) => v.toString(16).padStart(2, "0")).join("")
+  );
+}
+
+function processImage(img, idLower) {
   let w = img.naturalWidth;
   let h = img.naturalHeight;
   if (w > MAX_SIDE_PX || h > MAX_SIDE_PX) {
@@ -132,6 +213,13 @@ function processImage(img) {
   }
 
   ctx.putImageData(id, 0, 0);
+
+  const accent = dominantColorFromImageData(data, w, h);
+  if (accent && idLower) {
+    colorFromImageCache.set(idLower, accent);
+    onImageReady?.(idLower);
+  }
+
   return canvas.toDataURL("image/png");
 }
 
