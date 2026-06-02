@@ -115,12 +115,14 @@ function updateThreatMarkerScale() {
   const alt = pov?.altitude ?? 2.5;
   currentCamAlt = alt;
 
-  // Escala (más grande al acercarse).
+  // Escala (mucho más grande al acercarse para que la amenaza sea bien
+  // legible en zoom in). Curva: 0.7 (lejos) → 4.0 (muy cerca).
   let scale;
   if (alt > 2.5) scale = 0.7;
-  else if (alt > 1.0) scale = 0.7 + (1 - (alt - 1.0) / 1.5) * 0.5;   // → 1.2
-  else if (alt > 0.4) scale = 1.2 + (1 - (alt - 0.4) / 0.6) * 0.6;   // → 1.8
-  else scale = 1.8 + (1 - alt / 0.4) * 0.6;                          // → 2.4
+  else if (alt > 1.0) scale = 0.7 + (1 - (alt - 1.0) / 1.5) * 0.7;   // → 1.4
+  else if (alt > 0.4) scale = 1.4 + (1 - (alt - 0.4) / 0.6) * 1.0;   // → 2.4
+  else if (alt > 0.15) scale = 2.4 + (1 - (alt - 0.15) / 0.25) * 1.1; // → 3.5
+  else scale = 3.5 + (1 - alt / 0.15) * 0.8;                          // → 4.3
   document.documentElement.style.setProperty(
     "--threat-marker-scale",
     scale.toFixed(2)

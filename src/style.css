@@ -126,8 +126,8 @@ html, body {
    * para que las amenazas se vean chicas en vista global y crezcan a
    * medida que el jugador se acerca con pinch zoom. */
   position: relative;
-  width: 96px;
-  height: 96px;
+  width: 128px;
+  height: 128px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1338,8 +1338,8 @@ html, body {
   }
 
   .threat-marker {
-    width: 120px;
-    height: 120px;
+    width: 160px;
+    height: 160px;
   }
   .threat-marker .threat-icon {
     font-size: 38px;
